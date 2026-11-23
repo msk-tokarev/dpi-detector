@@ -1,0 +1,331 @@
+package inetutil
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/netip"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/hyperion-cs/dpi-checkers/ru/dpi-ch/config"
+	tls "github.com/refraction-networking/utls"
+)
+
+var (
+	ErrTcpConnReset          = errors.New("tcp: connection reset")
+	ErrTcpConnTimeout        = errors.New("tcp: connection timeout")
+	ErrTcpWriteTimeout       = errors.New("tcp: write timeout")
+	ErrTcpReadTimeout        = errors.New("tcp: read timeout")
+	ErrTlsCertificateInvalid = errors.New("tls: certificate invalid")
+	ErrTlsHandshakeTimeout   = errors.New("tls: handshake timeout")
+	ErrTlsHandshakeFail      = errors.New("tls: handshake failure")
+	ErrTlsInternal           = errors.New("tls: internal error")
+	ErrTlsBadRecordMac       = errors.New("tls: bad record MAC")
+	ErrTlsInvalidKeyShare    = errors.New("tls: invalid key share")
+	ErrTlsWriteBrokenPipe    = errors.New("tls: broken write pipe")
+	ErrHttpMalformedResponse = errors.New("http: malformed response")
+	ErrInternal              = errors.New("net: internal error")
+
+	tlsMu                     sync.Mutex
+	tlsDialerLocalAddr        net.Addr
+	tlsDialerLocalAddrHandled bool
+)
+
+var Fingerprints = map[string]*tls.ClientHelloID{
+	"chrome":  &tls.HelloChrome_133,
+	"firefox": &tls.HelloFirefox_120,
+	"safari":  &tls.HelloSafari_16_0,
+	"ios":     &tls.HelloIOS_14,
+	"android": &tls.HelloAndroid_11_OkHttp,
+	"edge":    &tls.HelloEdge_85,
+	"360":     &tls.Hello360_7_5,
+	"qq":      &tls.HelloQQ_11_1,
+}
+
+type TlsConnOpt struct {
+	Ctx                 context.Context
+	Ip                  netip.Addr
+	Port                int
+	Sni                 string
+	TcpConnTimeout      time.Duration
+	TcpWriteBuf         int
+	TcpReadBuf          int
+	TlsHandshakeTimeout time.Duration
+	InsecureVerify      bool
+	ClientHelloId       tls.ClientHelloID
+	OriginalAlpn        bool
+}
+
+var keyLogMu sync.Mutex
+var keyLogWriter io.Writer
+
+func KeyLogWriter() io.Writer {
+	keyLogMu.Lock()
+	defer keyLogMu.Unlock()
+	cfg := config.Get().InetUtil
+
+	if cfg.KeyLogPath == "" {
+		return io.Discard
+	}
+
+	if keyLogWriter == nil {
+		file, err := os.OpenFile(cfg.KeyLogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+		if err != nil {
+			panic(err)
+		}
+		keyLogWriter = file
+	}
+	return keyLogWriter
+}
+
+// TODO (options):
+// - Set proto (http/https)
+func GetHandshakedUTlsConn(opt TlsConnOpt) (*tls.UConn, error) {
+	cfg := config.Get().InetUtil
+	ctx := opt.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	tcpDialer := net.Dialer{LocalAddr: tlsDefaultDialerLocalAddr()}
+	if opt.TcpConnTimeout != 0 {
+		tcpDialer.Timeout = opt.TcpConnTimeout
+	}
+
+	addr := net.JoinHostPort(opt.Ip.String(), strconv.Itoa(opt.Port))
+	tcpConn, err := tcpDialer.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		if isTimeoutErr(err) {
+			return nil, ErrTcpConnTimeout
+		}
+		if handledErr, ok := tryHandleErr(err); ok {
+			return nil, handledErr
+		}
+
+		log.Println("getHandshakedUTlsConn/Dial", err)
+		return nil, ErrInternal
+	}
+
+	rawTcpConn := tcpConn.(*net.TCPConn)
+	if opt.TcpWriteBuf != 0 {
+		rawTcpConn.SetWriteBuffer(opt.TcpWriteBuf)
+	}
+	if opt.TcpReadBuf != 0 {
+		rawTcpConn.SetReadBuffer(opt.TcpReadBuf)
+	}
+
+	tlsConf := &tls.Config{
+		InsecureSkipVerify: !opt.InsecureVerify,
+		KeyLogWriter:       KeyLogWriter(),
+	}
+
+	if opt.Sni != "" {
+		tlsConf.ServerName = opt.Sni
+	}
+
+	tlsConn := tls.UClient(tcpConn, tlsConf, tls.HelloCustom)
+
+	fingerprint := Fingerprints[cfg.Fingerprint]
+	if fingerprint == nil {
+		panic(fmt.Sprintf(`inetutil=>fingerprint / invalid value: "%s".`, cfg.Fingerprint))
+	}
+	spec, _ := tls.UTLSIdToSpec(*fingerprint)
+	if opt.ClientHelloId.Client != "" || opt.ClientHelloId.Version != "" {
+		spec, _ = tls.UTLSIdToSpec(opt.ClientHelloId)
+	}
+
+	if !opt.OriginalAlpn {
+		// WARN: this change breaks fingerprint
+		// make sure that ClientHello does not contain ALPN for h2
+		setUTlsAlpn(&spec, []string{"http/1.1"})
+	}
+	tlsConn.ApplyPreset(&spec)
+
+	if opt.TlsHandshakeTimeout != 0 {
+		tlsConn.SetDeadline(time.Now().Add(opt.TlsHandshakeTimeout))
+		defer tlsConn.SetDeadline(time.Time{})
+	}
+
+	if opt.Ctx == nil {
+		err = tlsConn.Handshake()
+	} else {
+		err = tlsConn.HandshakeContext(opt.Ctx)
+	}
+
+	if err != nil {
+		tlsConn.Close()
+
+		if isTimeoutErr(err) {
+			return nil, ErrTlsHandshakeTimeout
+		}
+		if handledErr, ok := tryHandleErr(err); ok {
+			return nil, handledErr
+		}
+
+		log.Println("getHandshakedUTlsConn/Handshake", err)
+		return nil, ErrInternal
+	}
+
+	return tlsConn, nil
+}
+
+func setUTlsAlpn(spec *tls.ClientHelloSpec, protos []string) {
+	for i := range spec.Extensions {
+		if alpn, ok := spec.Extensions[i].(*tls.ALPNExtension); ok {
+			alpn.AlpnProtocols = protos
+			return
+		}
+	}
+	spec.Extensions = append(spec.Extensions, &tls.ALPNExtension{AlpnProtocols: protos})
+}
+
+// TODO: Should this be in the http.go file?
+func TlsReadHttpResponse(ctx context.Context, tlsConn *tls.UConn, br *bufio.Reader) (*http.Response, error) {
+	done := make(chan struct{})
+	defer close(done)
+	defer tlsConn.SetReadDeadline(time.Time{})
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = tlsConn.SetReadDeadline(time.Now())
+		case <-done:
+		}
+	}()
+
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		if isTimeoutErr(err) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, ErrTcpReadTimeout
+		}
+		if handledErr, ok := tryHandleErr(err); ok {
+			return nil, handledErr
+		}
+		log.Println("TlsReadHttpResponse", err)
+		return nil, ErrInternal
+	}
+	return resp, nil
+}
+
+func TlsWriteHttpRequest(ctx context.Context, tlsConn *tls.UConn, req *http.Request) (int64, error) {
+	done := make(chan struct{})
+	defer close(done)
+	defer tlsConn.SetWriteDeadline(time.Time{})
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = tlsConn.SetWriteDeadline(time.Now())
+		case <-done:
+		}
+	}()
+
+	var writeBuf bytes.Buffer
+	if err := req.Write(&writeBuf); err != nil {
+		return 0, err
+	}
+	n := int64(writeBuf.Len())
+
+	if _, err := tlsConn.Write(writeBuf.Bytes()); err != nil {
+		if isTimeoutErr(err) {
+			return 0, ErrTcpWriteTimeout
+		}
+		if handledErr, ok := tryHandleErr(err); ok {
+			return 0, handledErr
+		}
+		log.Println("TlsHttpRequest", err)
+		return 0, ErrInternal
+	}
+	return n, nil
+}
+
+func IsInetutilErr(err error) bool {
+	switch err {
+	case ErrTcpConnReset, ErrTcpConnTimeout, ErrTcpWriteTimeout,
+		ErrTcpReadTimeout, ErrTlsCertificateInvalid, ErrTlsHandshakeTimeout,
+		ErrTlsHandshakeFail, ErrTlsInternal, ErrTlsBadRecordMac,
+		ErrTlsInvalidKeyShare, ErrTlsWriteBrokenPipe, ErrHttpMalformedResponse,
+		ErrInternal:
+		return true
+	default:
+		return false
+	}
+}
+
+func isTimeoutErr(err error) bool {
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) ||
+			errors.Is(err, os.ErrDeadlineExceeded) {
+			return true
+		} else if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			return true
+		}
+	}
+	return false
+}
+
+// Try to handle errors. Assume that timeouts are already handled.
+func tryHandleErr(err error) (error, bool) {
+	// yeah, it looks like shit. but there's nothing we can do about it ;(
+
+	// alert errors: https://go.dev/src/crypto/tls/alert.go
+	if strings.Contains(err.Error(), "handshake failure") {
+		return ErrTlsHandshakeFail, true
+	}
+	if strings.Contains(err.Error(), "tls: internal error") {
+		return ErrTlsInternal, true
+	}
+	if strings.Contains(err.Error(), "bad record MAC") {
+		return ErrTlsBadRecordMac, true
+	}
+	if strings.Contains(err.Error(), "invalid server key share") {
+		return ErrTlsInvalidKeyShare, true
+	}
+	if strings.Contains(err.Error(), "malformed HTTP") {
+		return ErrHttpMalformedResponse, true
+	}
+
+	if _, ok := errors.AsType[*tls.CertificateVerificationError](err); ok {
+		return ErrTlsCertificateInvalid, true
+	}
+
+	// others
+	if strings.Contains(err.Error(), "connection reset") {
+		return ErrTcpConnReset, true
+	}
+	if strings.Contains(err.Error(), "write: broken pipe") {
+		return ErrTlsWriteBrokenPipe, true
+	}
+
+	return err, false
+}
+
+// Returns default tls dialer local address for inetutil package, considering network interface options in config.
+func tlsDefaultDialerLocalAddr() net.Addr {
+	tlsMu.Lock()
+	defer tlsMu.Unlock()
+
+	if !tlsDialerLocalAddrHandled {
+		if ifaceAddr, err := Iface4(); err == nil {
+			tlsDialerLocalAddr = &net.TCPAddr{
+				IP:   net.IP(ifaceAddr.AsSlice()),
+				Port: 0,
+			}
+		}
+
+		log.Println("inetutil/tls", "network interface options handled", tlsDialerLocalAddr)
+		tlsDialerLocalAddrHandled = true
+	}
+
+	return tlsDialerLocalAddr
+}

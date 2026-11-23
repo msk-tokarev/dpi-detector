@@ -1,0 +1,85 @@
+# Author: by Ivan Tokarev
+name: DPI Detector CI & Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  go-tests:
+    name: Go Bridge & Mobile Core Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+      - name: Test mobile extensions in core/dpi-ch
+        working-directory: core/dpi-ch
+        run: |
+          go test -v ./inetlookup -run TestReloadDefault
+          go test -v ./config -run TestDefaultYaml
+          go test -v ./checkers/fullcheck -run TestMobileExports
+      - name: Test Go bridge with race detector & coverage
+        working-directory: core/bridge
+        run: |
+          go test -v -race -coverprofile=coverage.out .
+          go tool cover -func=coverage.out
+      - name: Build Native Messaging Host
+        working-directory: core/native-host
+        run: go build -o ../../dist/dpich-native-host .
+
+  chrome-extension:
+    name: Chrome MV3 Extension Tests & Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run 100% coverage unit tests
+        working-directory: chrome-extension
+        run: node --test --experimental-test-coverage tests/extension.test.mjs
+      - name: Package Chrome Web Store ZIP
+        run: |
+          mkdir -p dist
+          cd chrome-extension
+          zip -r ../dist/dpi-detector-chrome-mv3.zip manifest.json popup.html sidepanel.html options.html PRIVACY.md icons src
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chrome-extension-mv3
+          path: dist/dpi-detector-chrome-mv3.zip
+
+  android-tests-and-apk:
+    name: Android Unit/Compose Tests (JaCoCo) & APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+      - name: Setup Android SDK & NDK
+        uses: android-actions/setup-android@v3
+      - name: Install NDK and build dpich.aar
+        run: |
+          sdkmanager "ndk;29.0.14206865" "platforms;android-36" "build-tools;36.1.0"
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          export PATH="$HOME/go/bin:$PATH"
+          export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/29.0.14206865"
+          mkdir -p android/app/libs
+          cd core/bridge
+          gomobile bind -target=android/arm64,android/arm,android/amd64 -androidapi 26 -javapkg com.dpidetector.core -ldflags="-s -w" -o ../../android/app/libs/dpich.aar .
+      - name: Run Unit + Compose UI tests & JaCoCo coverage
+        working-directory: android
+        run: ./gradlew testDebugUnitTest jacocoTestReport --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-jacoco-report
+          path: android/app/build/reports/jacoco/jacocoTestReport/html

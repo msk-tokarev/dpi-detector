@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "DPI Детектор — ISP & Network Diagnostics",
+  "short_name": "DPI Детектор",
+  "version": "1.0.0",
+  "author": "by Ivan Tokarev",
+  "description": "Диагностика DPI-ограничений провайдера: TCP 16-20 (L4-25), CIDR WhiteList, DoH и доступность сервисов (dpi-checkers).",
+  "homepage_url": "https://github.com/hyperion-cs/dpi-checkers",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "DPI Детектор — проверить текущую вкладку"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+  "options_page": "options.html",
+  "permissions": [
+    "storage",
+    "activeTab",
+    "sidePanel"
+  ],
+  "optional_permissions": [
+    "webRequest",
+    "nativeMessaging"
+  ],
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ]
+}

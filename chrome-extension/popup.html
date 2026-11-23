@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>DPI Детектор</title>
+  <link rel="stylesheet" href="src/ui/styles.css" />
+</head>
+<body class="popup-body">
+  <div class="header">
+    <div class="brand">
+      <img src="icons/icon48.png" alt="DPI" />
+      <div>
+        <div class="brand-title">DPI Детектор</div>
+        <div class="brand-sub">by Ivan Tokarev</div>
+      </div>
+    </div>
+    <button id="btn-sidepanel" class="btn btn-outline btn-sm">Полная панель ↗</button>
+  </div>
+
+  <div class="container">
+    <div class="card">
+      <div class="row">
+        <div class="card-title">Текущий сайт</div>
+        <span id="host-badge" class="badge neutral">—</span>
+      </div>
+      <div id="current-host" class="mono muted" style="margin: 4px 0 10px;">Определение вкладки…</div>
+      <button id="btn-probe-tab" class="btn btn-accent">Проверить этот сайт на DPI (TCP 16-20)</button>
+      <div id="tab-probe-result" style="margin-top: 10px;"></div>
+    </div>
+
+    <div id="radar-card" class="card hidden">
+      <div class="card-title" style="color: var(--bad);">Радар поймал обрывы на вкладке</div>
+      <div id="radar-list" class="console" style="margin-top: 6px;"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Быстрая диагностика провайдера</div>
+      <div class="muted" style="margin-bottom: 10px;">
+        Откроет боковую панель со всеми чекерами: Whoami, CIDR Белые списки, TCP 16-20 (L4-25), DoH и экспорт JSON.
+      </div>
+      <button id="btn-open-full" class="btn btn-primary">Открыть сканер DPI</button>
+    </div>
+
+    <div class="footer-credit">На базе hyperion-cs/dpi-checkers · by Ivan Tokarev</div>
+  </div>
+
+  <script type="module" src="src/ui/popup.js"></script>
+</body>
+</html>

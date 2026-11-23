@@ -1,0 +1,11 @@
+{
+  "name": "dpi-detector-chrome",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "author": "by Ivan Tokarev",
+  "description": "Chrome MV3 DPI diagnostics extension based on hyperion-cs/dpi-checkers",
+  "scripts": {
+    "test": "node --test --experimental-test-coverage tests/extension.test.mjs"
+  }
+}

@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<!-- Author: by Ivan Tokarev -->
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DPI Детектор — Инструкция «для деревенских» со скриншотами</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: #070A0E; color: #E9EEF5;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      line-height: 1.6;
+    }
+    .wrap { max-width: 1020px; margin: 0 auto; padding: 32px 20px 64px; }
+    .hero {
+      background: linear-gradient(135deg, #101A24 0%, #0B0F14 100%);
+      border: 1px solid #243041; border-radius: 18px; padding: 28px;
+      margin-bottom: 28px;
+    }
+    .hero h1 { margin: 0 0 8px; font-size: 28px; }
+    .hero h1 span { color: #2EE59D; }
+    .badge {
+      display: inline-block; padding: 4px 12px; border-radius: 99px; font-size: 12px; font-weight: 700;
+      background: rgba(46,229,157,0.14); border: 1px solid rgba(46,229,157,0.35); color: #2EE59D;
+    }
+    section {
+      background: #0B0F14; border: 1px solid #243041; border-radius: 16px;
+      padding: 22px 24px; margin-bottom: 22px;
+    }
+    h2 { margin: 0 0 12px; font-size: 20px; color: #4CC9F0; }
+    .shot {
+      display: block; max-width: 100%; height: auto; margin: 14px auto;
+      border-radius: 14px; border: 1px solid #243041;
+      box-shadow: 0 14px 36px rgba(0,0,0,0.5);
+    }
+    p, li { color: #C5D1E0; font-size: 14.5px; }
+    code {
+      background: #131A23; border: 1px solid #243041; border-radius: 6px;
+      padding: 2px 6px; font-family: "Cascadia Mono", Consolas, monospace; font-size: 12.5px; color: #2EE59D;
+    }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+    th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #243041; font-size: 14px; }
+    th { color: #4CC9F0; }
+    .warn {
+      background: rgba(255,184,77,0.12); border-left: 4px solid #FFB84D;
+      padding: 12px 14px; border-radius: 8px; color: #FFE1B0; margin: 12px 0;
+    }
+    footer { text-align: center; color: #5D6D82; font-size: 13px; margin-top: 28px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <div class="badge">by Ivan Tokarev</div>
+      <h1><span>DPI Детектор</span> — инструкция «для деревенских»</h1>
+      <p>Все 7 сценариев использования на <strong>Android</strong> и в <strong>Google Chrome</strong> простыми словами и со скриншотами. Ядро: <code>hyperion-cs/dpi-checkers</code>.</p>
+      <div class="warn"><strong>Главное правило перед проверкой:</strong> обязательно <b>выключите VPN</b>! Иначе приложение проверит не вашего провайдера, а сервер VPN.</div>
+    </div>
+
+    <section>
+      <h2>Сценарий 1. Установка APK на Android</h2>
+      <img class="shot" src="docs/screenshots/00_android_install_scenario.png" alt="Установка APK на Android" />
+      <ol>
+        <li>Перекиньте на телефон файл <code>dist/dpi-detector-arm64-v8a.apk</code> (для старых телефонов — <code>dpi-detector-universal.apk</code>).</li>
+        <li>Откройте файл → разрешите установку из этого источника → нажмите <strong>«Установить»</strong>.</li>
+        <li>Выключите VPN и запустите <strong>«DPI Детектор»</strong>.</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>Сценарий 2. Полная диагностика на экране «Сканер»</h2>
+      <img class="shot" src="docs/screenshots/01_scanner_overview.png" alt="Главный экран Сканера" />
+      <p>Дождитесь надписи <code>GeoLite: готова</code> (база вшита внутрь APK, ничего качать не надо) и нажмите зелёную кнопку <strong>«Запустить проверку DPI»</strong>. Через 20–60 секунд появится итоговый вердикт и карточка <strong>Whoami</strong>.</p>
+    </section>
+
+    <section>
+      <h2>Сценарий 3. Разбор заблокированных сайтов («Хосты») и DNS</h2>
+      <img class="shot" src="docs/screenshots/02_hosts_and_dns.png" alt="Хосты и DNS" />
+      <p>Нажмите <strong>«Только проблемы»</strong>, чтобы сразу увидеть, какие сервисы режет провайдер. Тап по карточке раскрывает подсеть, TLS, сертификат и скорость. На вкладке <strong>«DNS»</strong> видны утечки, перехват UDP DNS и статус DoH.</p>
+    </section>
+
+    <section>
+      <h2>Сценарий 4. Быстрая проверка своего сайта или VPS («Хост»)</h2>
+      <img class="shot" src="docs/screenshots/03_host_probe.png" alt="Проверка своего хоста" />
+      <p>Впишите любой домен или IPv4 вашего сервера (либо кликните готовый пресет) и нажмите <strong>«Проверить хост»</strong> — через 5 секунд будет диагноз по SNI, TCP 16-20 и «сибирским» фильтрам.</p>
+    </section>
+
+    <section>
+      <h2>Сценарий 5. История проверок и экспорт JSON («Отчёты»)</h2>
+      <img class="shot" src="docs/screenshots/04a_reports_scenario.png" alt="Отчёты и экспорт" />
+      <p>Каждая проверка сохраняется автоматически. Можно сравнить Wi-Fi и 4G/5G и отправить JSON-файл через «Поделиться» (совместим с десктопным <code>dpich --import-all</code>).</p>
+    </section>
+
+    <section>
+      <h2>Сценарий 6. Настройки, база GeoLite2 и свой config.yaml</h2>
+      <img class="shot" src="docs/screenshots/04_reports_settings.png" alt="Настройки" />
+      <p>Здесь можно при желании обновить встроенную базу GeoLite2 с GitHub и прописать свои фильтры <code>subnetfilter</code> в <code>config.yaml</code>.</p>
+    </section>
+
+    <section>
+      <h2>Сценарий 7. Плагин для Google Chrome / Edge / Brave</h2>
+      <img class="shot" src="docs/screenshots/06_chrome_install_scenario.png" alt="Установка плагина Chrome" />
+      <img class="shot" src="docs/screenshots/05_chrome_extension.png" alt="Интерфейс плагина Chrome" />
+      <p>Откройте <code>chrome://extensions</code> → включите «Режим разработчика» → «Загрузить распакованное» → выберите папку <code>chrome-extension</code>. Клик по иконке проверяет текущий сайт; кнопка «Полная панель» открывает Side Panel со всеми чекерами.</p>
+    </section>
+
+    <section>
+      <h2>Словарь «на пальцах» — что означают статусы</h2>
+      <table>
+        <tr><th>Статус</th><th>Что происходит простыми словами</th></tr>
+        <tr><td><strong>SNI-блок</strong></td><td>Провайдер видит имя домена при старте HTTPS и сразу рвёт связь (сам сервер живой).</td></tr>
+        <tr><td><strong>TCP 16-20 (L4-25)</strong></td><td>Первые ~16–20 КБ проходят, а потом соединение намертво зависает после ~25-го пакета.</td></tr>
+        <tr><td><strong>Сибирский: БЛОК</strong></td><td>Одиночный запрос проходит, но серия параллельных соединений Chrome режется.</td></tr>
+        <tr><td><strong>CIDR WhiteList</strong></td><td>Работают только «белые» сайты (<code>ya.ru</code>, <code>vk.ru</code>, <code>max.ru</code>), остальной интернет отрезан по подсетям.</td></tr>
+        <tr><td><strong>DNS Подмена / Перехват</strong></td><td>Провайдер перехватывает DNS-запрос и подсовывает фальшивый IP или ложный «сайт не найден».</td></tr>
+      </table>
+    </section>
+
+    <footer>Создано: <strong>by Ivan Tokarev</strong> · На базе hyperion-cs/dpi-checkers (Apache-2.0)</footer>
+  </div>
+</body>
+</html>

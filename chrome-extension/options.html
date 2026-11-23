@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>DPI Детектор — Настройки</title>
+  <link rel="stylesheet" href="src/ui/styles.css" />
+</head>
+<body style="max-width:680px;margin:0 auto;">
+  <div class="header">
+    <div class="brand">
+      <img src="icons/icon48.png" alt="DPI" />
+      <div>
+        <div class="brand-title">DPI Детектор — Настройки</div>
+        <div class="brand-sub">by Ivan Tokarev</div>
+      </div>
+    </div>
+    <a href="sidepanel.html" class="btn btn-outline btn-sm" style="text-decoration:none;">Открыть сканер</a>
+  </div>
+  <div class="container">
+    <div class="card">
+      <div class="card-title">Справка по диагностическим методам</div>
+      <div class="muted">
+        <p><strong>TCP 16-20 (L4-25):</strong> после успешного HEAD отправляется 64 КБ случайных данных по POST. Если соединение «зависает» до таймаута — зафиксирован классический сброс/дроп после ~16–20 КБ.</p>
+        <p><strong>CIDR WhiteList:</strong> сравнение доступности ресурсов «белого списка» (ya.ru, vk.ru, max.ru) и обычных зарубежных ресурсов (github.com, wikipedia.org, google.com).</p>
+        <p><strong>DNS over HTTPS (DoH):</strong> бинарные запросы RFC 8484 к 8 публичным DoH-резолверам с проверкой NXDOMAIN-спуфинга и таймаутов.</p>
+        <p><strong>Pro-режим (Native Host):</strong> локальный Go-компаньон <code>dpich-native-host</code> открывает SNI-пробы, uTLS («сибирские» ограничения) и Plain UDP :53 DNS.</p>
+      </div>
+    </div>
+    <div class="footer-credit">Авторы: by Ivan Tokarev · На базе hyperion-cs/dpi-checkers</div>
+  </div>
+</body>
+</html>

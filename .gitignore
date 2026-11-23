@@ -1,0 +1,10 @@
+_ref/
+dist/
+android/local.properties
+android/.gradle/
+android/build/
+android/app/build/
+android/app/libs/dpich.aar
+chrome-extension/store-assets/*.zip
+*.jks
+*.keystore

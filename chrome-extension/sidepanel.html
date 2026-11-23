@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <title>DPI Детектор — Панель диагностики</title>
+  <link rel="stylesheet" href="src/ui/styles.css" />
+</head>
+<body>
+  <div class="header">
+    <div class="brand">
+      <img src="icons/icon48.png" alt="DPI" />
+      <div>
+        <div class="brand-title">DPI Детектор</div>
+        <div class="brand-sub">hyperion-cs/dpi-checkers · by Ivan Tokarev</div>
+      </div>
+    </div>
+    <span id="native-badge" class="badge neutral">Browser MV3</span>
+  </div>
+
+  <div class="container">
+    <div class="tabs">
+      <button class="tab active" data-tab="scanner">Сканер</button>
+      <button class="tab" data-tab="host">Хост</button>
+      <button class="tab" data-tab="reports">Отчёты</button>
+      <button class="tab" data-tab="settings">Настройки</button>
+    </div>
+
+    <!-- TAB: SCANNER -->
+    <section id="tab-scanner" class="container" style="padding:0;">
+      <div class="card">
+        <div class="card-title">Модули проверки</div>
+        <div class="muted" style="margin-bottom:8px;">Отключите VPN перед сканированием для точного результата.</div>
+        <div class="wrap" id="module-chips" style="margin-bottom:10px;">
+          <span class="chip selected" data-mod="whoami">Whoami (IP/ASN)</span>
+          <span class="chip selected" data-mod="cidr">CIDR Белые списки</span>
+          <span class="chip selected" data-mod="webhost">Сервисы &amp; TCP 16-20</span>
+          <span class="chip selected" data-mod="doh">DNS over HTTPS (DoH)</span>
+        </div>
+        <button id="btn-scan" class="btn btn-primary">Запустить проверку DPI</button>
+        <button id="btn-cancel" class="btn btn-danger hidden">Остановить проверку</button>
+      </div>
+
+      <div id="verdict-card" class="card hidden"></div>
+      <div id="whoami-card" class="card hidden"></div>
+      <div id="cidr-card" class="card hidden"></div>
+      <div id="webhost-card" class="card hidden"></div>
+      <div id="doh-card" class="card hidden"></div>
+
+      <div id="log-card" class="card hidden">
+        <div class="row" style="margin-bottom:6px;">
+          <div class="card-title" style="margin:0;">Журнал событий</div>
+          <span id="log-count" class="muted mono">0</span>
+        </div>
+        <div id="log-console" class="console"></div>
+      </div>
+    </section>
+
+    <!-- TAB: HOST PROBE -->
+    <section id="tab-host" class="container hidden" style="padding:0;">
+      <div class="card">
+        <div class="card-title">Быстрая проверка своего хоста</div>
+        <div class="muted" style="margin-bottom:8px;">
+          Проверяет доступность и TCP 16-20 (L4-25) для любого домена или IPv4.
+        </div>
+        <input id="probe-input" class="input mono" placeholder="например, www.youtube.com или 1.1.1.1" />
+        <div class="wrap" style="margin:8px 0;">
+          <span class="chip preset-chip" data-host="www.youtube.com">youtube.com</span>
+          <span class="chip preset-chip" data-host="discord.com">discord.com</span>
+          <span class="chip preset-chip" data-host="x.com">x.com</span>
+          <span class="chip preset-chip" data-host="github.com">github.com</span>
+          <span class="chip preset-chip" data-host="1.1.1.1">1.1.1.1</span>
+        </div>
+        <button id="btn-probe-host" class="btn btn-accent">Проверить хост</button>
+      </div>
+      <div id="probe-history" class="container" style="padding:0;"></div>
+    </section>
+
+    <!-- TAB: REPORTS -->
+    <section id="tab-reports" class="container hidden" style="padding:0;">
+      <div class="card">
+        <div class="row">
+          <div>
+            <div class="card-title" style="margin:0;">Сохранённые отчёты</div>
+            <div class="muted">Формат JSON совместим с dpich --import-all</div>
+          </div>
+          <button id="btn-refresh-reports" class="btn btn-outline btn-sm">Обновить</button>
+        </div>
+      </div>
+      <div id="reports-list" class="container" style="padding:0;"></div>
+    </section>
+
+    <!-- TAB: SETTINGS -->
+    <section id="tab-settings" class="container hidden" style="padding:0;">
+      <div class="card">
+        <div class="card-title">Параметры и разрешения</div>
+        <div class="muted" style="margin-bottom:8px;">
+          Пассивный радар отслеживает обрывы TCP/TLS (ERR_CONNECTION_RESET / TIMED_OUT) на открываемых сайтах.
+        </div>
+        <button id="btn-enable-radar" class="btn btn-outline" style="margin-bottom:8px;">
+          Включить пассивный радар вкладки (webRequest)
+        </button>
+        <button id="btn-connect-native" class="btn btn-outline">
+          Подключить Pro-режим (Native Host dpich)
+        </button>
+        <div id="settings-msg" class="muted" style="margin-top:8px;"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Пользовательские хосты (по одному на строку)</div>
+        <textarea id="custom-hosts" class="input mono" rows="4" placeholder="my-vps.example.com&#10;1.1.1.1"></textarea>
+        <button id="btn-save-settings" class="btn btn-primary" style="margin-top:8px;">Сохранить настройки</button>
+      </div>
+
+      <div class="card">
+        <div class="card-title">О расширении</div>
+        <div class="muted">
+          <div><strong>Авторы:</strong> by Ivan Tokarev</div>
+          <div><strong>Движок:</strong> hyperion-cs/dpi-checkers (Apache-2.0)</div>
+          <div><strong>Приватность:</strong> Все проверки выполняются локально с вашего браузера; никакие данные никуда не отправляются.</div>
+        </div>
+      </div>
+    </section>
+
+    <div class="footer-credit">DPI Детектор v1.0 · by Ivan Tokarev</div>
+  </div>
+
+  <script type="module" src="src/ui/sidepanel.js"></script>
+</body>
+</html>

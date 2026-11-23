@@ -1,0 +1,307 @@
+# RU :: DPI-CH (dpi comprehensive checker)
+[![dpi-ch release](https://github.com/hyperion-cs/dpi-checkers/actions/workflows/dpich_release.yml/badge.svg)](https://github.com/hyperion-cs/dpi-checkers/actions/workflows/dpich_release.yml)
+
+This is the "big brother" of all other checkers, not limited by the browser sandbox. It is an attempt to create a powerful tool for general-purpose DPI analysis (incl. an improved _[tcp 16-20](https://github.com/net4people/bbs/issues/490)_, "[siberian](https://habr.com/ru/articles/1044396/)" restrictions checkers and much more).<br>
+Extremely flexible configuration. Written in golang, builds are [available](https://github.com/hyperion-cs/dpi-checkers/releases/) for Windows/macOS/Linux/Android.<br>
+\* Of course, you can always compile and run it from [source](https://github.com/hyperion-cs/dpi-checkers/tree/main/ru/dpi-ch).
+![gif](https://raw.githubusercontent.com/hyperion-cs/dpi-checkers/refs/heads/main/static/images/dpich_v0.8.0_demo.gif)
+
+## Implemented features
+- **Who am I?** about your internet connection; aka _whoami checker_;
+- **Am I under the CIDR whitelist?** checks if a censor restricts tcp/udp connections by ip subnets; aka _cidrwhitelist_ checker;
+- **Comprehensive services/providers checks** (_incl. alive, tcp 16-20 and "siberian" restrictions_); aka _webhost checker_.
+  
+  The following sections are available in the standard configuration (they can be replaced with any others):
+  - **Popular Web Services** like YouTube, Instagram, Discord, Telegram and others;
+  - **Foreign Infrastructure Providers** like Cloudflare, Akamai, Hetzner, DigitalOcean and others;
+  - **Russian Infrastructure Providers** like Selectel, Reg.ru, Yandex Cloud and others;
+  - **Mobile Push Notification Providers** like Google FCM (Android), Apple APNs (iOS) and others.
+
+  It can also be used for detecting subnets from a CIDR whitelist, and much more.
+- **DNS** checks if a censor is spoofing dns responses, hijacking servers, DoH blocking, etc; aka _dns checker_;
+- Modern TUI (aka CLI) with flexible parallel workers;
+- Export results to a file (json or yaml);
+- Automatic utility update from Github releases;
+- Some killer features.
+
+## How to run/install the dpi-ch
+To start _dpi-ch_, simply download and run the relevant binary from the [latest](https://github.com/hyperion-cs/dpi-checkers/releases/latest) release (this only needs to be done once, after which the utility will update automatically). Alternatively, you can "install" the utility from the command line or use Docker:
+
+#### Linux / macOS / Android (via [Termux](https://github.com/termux/termux-app))
+```bash
+bash <(curl -Ls https://hyperion-cs.github.io/dpi-checkers/ru/dpi-ch/install/unix.sh)
+```
+💡 This script will just find the latest release that matches your OS and architecture, and download, extract, and set it up in the following path: `~/.local/bin/dpich`
+
+#### Windows
+We recommend using [Terminal](https://github.com/microsoft/terminal) for adequate tui behavior. 
+
+```powershell
+iwr https://hyperion-cs.github.io/dpi-checkers/ru/dpi-ch/install/windows.ps1 -UseB | iex
+```
+💡 This script will just find the latest release that matches your architecture, and download, extract, and set it up in the following path: `%LOCALAPPDATA%\Programs\dpich\dpich.exe`
+
+#### Docker
+We recommend using the version without Docker, but you are welcome to use it if you prefer.
+
+Launch the latest version in "_delete all data after exiting dpi-ch_" mode:
+```bash
+docker run --rm -it --pull=always ghcr.io/hyperion-cs/dpich:latest
+```
+
+Specific version:
+```bash
+docker run --rm -it --pull=always ghcr.io/hyperion-cs/dpich:v0.6.0
+```
+
+With a custom configuration (example for Linux/macOS):
+```bash
+docker run --rm -it --pull=always \
+  -v "$(pwd)/config.yaml:/etc/dpich/config.yaml:ro" \
+  ghcr.io/hyperion-cs/dpich:latest
+```
+
+Pull a new image to update `dpich`. Add `-v dpich-data:/var/lib/dpich` to keep downloaded `inetlookup` data between runs in a named Docker volume called `dpich-data`. To save `ALL` reports on the host, mount an output directory at `/work`.
+
+## Killer features
+#### ⚡ New method for tcp 16-20 (aka l4-25)
+Now, to check for restrictions using the _tcp 16-20_ method, we send data to the host instead of trying to get/download something from it. Research shows that outgoing traffic is restricted by censors in the same way as incoming traffic. This really lowers the requirements for hosts (they just must be able to establish a tcp connection and not close it when they see a stream of data coming from us that's big enough). A similar method is now implemented in the [web version](https://hyperion-cs.github.io/dpi-checkers/ru/tcp-16-20/) of the _tcp 16-20_ checker.
+
+It is now also known that what is actually restricted is not the total amount of data transmitted, but the number of packets transmitted in both directions (incoming and outgoing). This is typically limited to 25 packets, and this applies to both tcp and udp. Thus, it was proposed to change the name `tcp 16-20` to `l4-25`. Raw experiments with tcp can be performed using [this](https://github.com/hyperion-cs/dpi-checkers/blob/main/utils/l4-25_prober.py) script, and [nping](https://nmap.org/nping/) can be used for udp.
+
+#### ⚡ The era of dynamic: extremely flexible configuration of hosts for checking (for webhost checker)
+Now, in the _dpi-ch_ utility, we **do not use** fixed host lists (especially for checking infrastructure providers), incl. for checking _tcp 16-20_, etc. Instead, we obtain such hosts dynamically for each check.
+This allows us not to worry about the censor adding our fixed list to their whitelists (to fool our checker), and it also reduces the load on the hosts being checked, since they are unique for each user.
+
+A logical question comes up: how do we set this up? With a new approach — "filters". Each of them returns a set of subnets that satisfy a condition — we will be testing the hosts from them. They are customized in the configuration (see the related section for more details). It may sound complicated at first, but in practice it's a very simple and powerful thing. We can specify not specific hosts (and certainly not endpoints), but much **more general things**. Among them:
+- `org(x1,...,xn)`, where `x` is one of the following:
+  - _term_ — as a rule, the name of the organization that holds [AS](https://en.wikipedia.org/wiki/Autonomous_system_(Internet)); in fact, this is for a registry-independent search for a substring in the "organization" field within a special registry of all AS;
+  - _asn_ — for the specified AS number, an organization name is obtained, and it is then used as _term_ (two-phase search);
+  - _ip_ — for the specified IP addr, an organization name is obtained, and it is then used as _term_ (two-phase search).
+
+  Example: `org("hetzner")` — returns a set of subnets that are owned by Hetzner.
+- `as(x1,...,xn)`, where `x` is one of the following:
+  - _asn_ — AS number;
+  - _ip_ — for the specified IP addr, an AS number is obtained, and it is then used as _asn_ (two-phase search);
+
+  Example: `as(24940)` — returns a set of subnets announced by AS24940.
+- `country(x1,...,xn)`, where `x` is the [ISO 3166-1 alpha-2](https://en.wikipedia.org/wiki/List_of_ISO_3166_country_codes) country code.
+
+  Example: `country("he", "fi")` — returns a set of all subnets located in Germany or Finland.
+- `subnet(x1,...,xn)`, where `x` is one of the following:
+  - _subnet_ — just a subnet specified manually in cidr notation (up to `/32` for ipv4);
+  - _ip_ — for the specified IP addr, an minimal subnet is obtained (from AS that announce this IP), and it is then used as _subnet_ (two-phase search);
+
+  Example1: `subnet("1.1.1.1")` — returns the smallest subnet (but **larger** than /32) for 1.1.1.1 (from AS that announce this IP);<br>
+  Example2: `subnet("1.1.1.1/32")` — returns a set from **one IP** address;<br>
+  Example3: `subnet("1.1.1.0/24")` — returns the 1.1.1.0/24 subnet.<br>
+- `host(x1,...,xn)`, where `x` is a hostname
+
+  Example: `host("google.com")` — returns a set of subnets to which DNS resolves the specified hostname.
+
+Each filter returns a set of subnets that satisfy that filter. They also support multiple arguments and can be combined using logical AND/OR and groups.<br>
+Example 1: `(org("hetzner", "digitalocean") && country("de", "fi")) || as(199524, 53667)`<br>
+Example 2: `org("hetzner") && country("he")` — returns a set of subnets that are owned by Hetzner and used in hosts in Germany.
+
+The default configuration already includes default filter options for popular web services and infrastructure providers (see below), but we hope you will be able to take full benefit of this flexible feature to suit your needs. By the way, this mechanism inside dpi-ch is called _subnetfilter_ and it works locally without the internet.
+
+## Planned
+- [x] Comprehensive DNS checker (leak test, detection of response spoofing, server hijacking, etc.);
+- [ ] Trigger blocks checker;
+- [x] More detailed information in checkers (_statuses, reasons, etc._);
+- [ ] TLS certificate hijacking detection in _webhost_ checker;
+- [ ] Option to temporarily freeze the list of hosts in _webhost_ checker;
+- [x] Estimation of internet connection speed (including shaping/slowdown detection) in _webhost_ checker;
+- [x] Detecting subnets for CIDR whitelists;
+- [ ] Detecting hostnames for for SNI whitelists;
+- [ ] Integration with [zapret](https://github.com/bol-van/zapret2) to find optimal strategies;
+- [x] Android version (via [Termux](https://github.com/termux/termux-app));
+- [ ] Web UI in addition to TUI (backend is already architecturally separated from frontend);
+- And a few other minor things.
+
+:bulb: Want anything else? Create an [issue](https://github.com/hyperion-cs/dpi-checkers/issues) or [PR](https://github.com/hyperion-cs/dpi-checkers/pulls).
+
+## Understanding the results
+
+We hope most values and the logic behind the results are more or less clear, but below we explain a few things we thought were worth clarifying.
+
+#### Webhost checker
+
+##### Cert SAN/CN
+
+Only the "primary" domain extracted from the certificate (selected using special rules) is shown, along with a few attributes, because more information simply won't fit. `ALL` mode exports everything available (also included in logs in debug mode).
+
+The attributes in the `Cert SAN/CN` column are:
+
+| Attribute | Meaning |
+|---|---|
+| Trailing `+` | The certificate contains other domain names (even after wildcard merging, etc.). |
+| Leading `[*.]` | The certificate includes both the wildcard and its base domain (e.g. `*.site.com` + `site.com`). |
+| Leading `*.` | The certificate includes only the wildcard form of this domain. |
+| Leading `///.` | The name is too long and has been shortened to TLD+1. |
+| Leading `///` | The name is too long even after shortening to TLD+1 and has been truncated. |
+
+Attributes can be combined: `[*.]site.com+` means the certificate includes `site.com`, `*.site.com`, and other domain names.
+
+## Configuration
+You can view the default configuration [here](https://github.com/hyperion-cs/dpi-checkers/blob/main/ru/dpi-ch/config/default.yaml) (incl. as an example; some options are internal and are not intended to be changed by users).<br>
+In any case, any option in the default configuration can be overwritten by users using a [.yaml](https://en.wikipedia.org/wiki/YAML) file. To do this, edit the `config.yaml` file that `dpich` creates on startup at the default path below (the path to the file can be changed with the `--cfg` command line [argument](https://github.com/hyperion-cs/dpi-checkers/tree/main/ru/dpi-ch/docs#flags)). The current configuration structure is available [here](https://github.com/hyperion-cs/dpi-checkers/blob/main/ru/dpi-ch/config/config.go), but below is an attempt to describe it in more detail.
+
+| Platform | Default configuration file | Default data directory |
+| --- | --- | --- |
+| Linux (incl. Android) | `$XDG_CONFIG_HOME/dpich/config.yaml` or `~/.config/dpich/config.yaml` | `$XDG_DATA_HOME/dpich/` or `~/.local/share/dpich/` |
+| macOS | `~/Library/Application Support/dpich/config.yaml` | `~/Library/Application Support/dpich/data/` |
+| Windows | `%APPDATA%\dpich\config.yaml` | `%LOCALAPPDATA%\dpich\data` |
+| Docker | `/etc/dpich/config.yaml` | `/var/lib/dpich/` |
+
+Press `p` in the tui to switch between these paths in the footer. Relative data paths in .yaml are resolved from the directory containing that file.
+
+Structure of primary options (internal hidden):
+```yaml
+debug: # bool; if true, debug info will be saved to the debug.log file in the data directory
+
+checkers: # checkers, available in the dpi-ch utility
+  cidrwhitelist: # aka cidrwhitelist checker
+    timeout:     # time.Duration; timeout for receiving a response from the next endpoint
+    whitelisted: # []string; list of url endpoints that are accessible during cidr restrictions
+    regular:     # []string; list of url endpoints that are available during "normal hours"
+
+  webhost: # aka webhost checker
+    sections: # []webhost-section; just webhost logical sections: in dpi-ch menu, it'll be able to run each one separately
+
+              # webhost-section structure:
+              # name:    # string; section name
+              # desc:    # string; section description
+              # targets: # []webhost-target; list of targets
+
+                         # webhost-target structure:
+                         # name:            # string; name of hosts group
+                         # filter:          # string; filter in subnetfilter notation (see above);
+                                            #         if it is one host(), then sni/host will be obtained from there
+                         # count:           # int; how many hosts do we need to farm through webhostfarm
+                         # port:            # int; port for establishing a tcp connection with hosts
+                         # host:            # string; http host header for hosts (empty by default)
+                         # sni:             # string; sni for tls handshake (empty by default)
+                         # tcp1620-skip:    # bool; skip "tcp 16-20" check for hosts
+                         # siberian-skip:   # bool; skip "siberian restriction" check for hosts
+                         # random-hostname: # bool; generate a random http host header for each host (also override sni)
+
+    workers:                  # int; number of parallel workers that will find and analyze hosts
+    farm-timeout:             # time.Duration; total timeout for hosts farming; if 0, then no limits
+    tcp-conn-timeout:         # time.Duration; timeout for establishing a tcp connection
+    tls-handshake-timeout:    # time.Duration; timeout for tls handshake
+    tcp-read-timeout:         # time.Duration; timeout for reading from a tcp connection (more precisely, from tls over tcp)
+    tcp-write-timeout:        # time.Duration; timeout for writing to a tcp connection (more precisely, to tls over tcp)
+    tcp-write-buf:            # int; tcp/tls write buffer size (expert warn: only change if you know what you are doing)
+    tcp-read-buf:             # int; tcp/tls read buffer size (also only for experts)
+    tcp1620-n-bytes:          # int; size of random payload for tcp 16-20 (also only for experts)
+    siberian-conn-count:      # int; number of connections to "suspicious" server that is sufficient to trigger restriction
+    siberian-fingerprint:     # string; specifies which browser fingerprint will be used for "siberian" restrictions check;
+                              #         has higher priority than inetutil => fingerprint;
+                              #         supported values: chrome (v133), firefox (v120), safari (v16.0), ios (v14),
+                              #                           android (v11), edge (v85), 360 (v7.5), qq (v11.1)
+    table-max-visible-rows:   # int; number of visible rows in the results table (if there are more, scrolling is available)
+    http-static-headers:      # map[string]string; http headers that will be sent as part of requests to hosts
+    exclude-default-sections: # bool; exclude default sections from checks (and menu) if custom ones are specified
+
+  dns: # aka dns checker
+    table-max-visible-rows: # int; number of visible rows in results tables (if there are more, scrolling is available)
+
+    resolve:
+      plain-opt:
+        query-timeout:    # time.Duration; timeout for one plain DNS lookup; also used for DoH bootstrap
+        provider-timeout: # time.Duration; total budget for one provider's plain checks, including filters and hijacking
+        workers:          # int; number of parallel plain dns workers
+
+      doh-opt:
+        query-timeout:       # time.Duration; timeout for one DoH request, including TCP, TLS and the full response body
+        provider-timeout:    # time.Duration; total budget for one provider's DoH checks, including bootstrap and filters
+        workers:             # int; number of parallel doh workers
+        path:                # string; doh endpoint path
+        http-static-headers: # map[string]string; http headers for doh requests
+
+      whoami: # provider hijacking test (plain mode only)
+        host: # string; domain name whose A record holds the address of the resolver
+              #         that actually answered (e.g. whoami.akamai.net)
+
+      targets: # []target-item; list of test targets for resolving
+               # target-item structure:
+               # host:   # string; domain name for resolving (e.g. google.com)
+               # filter: # string; filter in subnetfilter notation that determines if a dns resolving occurred without spoofing
+    
+      providers: # []provider-item; list of dns providers (both plain and doh)
+                 # provider-item structure:
+                 # name:   # string; name of the provider
+                 # plain:  # provider-plain; provider's plain dns resolvers
+                           # provider-plain structure:
+                           # filter: # string; a filter in subnetfilter notation to detect provider hijacking
+                           # hosts:  # []string; list of provider's plain dns resolvers in ip:port format
+                 # doh:    # provider-doh; provider's doh dns resolvers
+                           # provider-doh structure:
+                           # filter: # string; a filter in subnetfilter notation to detect DoH bootstrap spoofing
+                           # hosts:  # []string; list of provider's doh dns resolvers in domain name format (e.g. dns.google)
+
+  whoami: # aka whoami checker
+    timeout: # time.Duration; total timeout for receiving checker results
+
+all: # all checks mode settings (result will be saved to a file)
+  format:    # string; output file format; for the file structure, see ALL_STRUCT.md
+             #         supported values: json, yaml
+  checkers:  # []string; list of checks that will be executed
+             #           supported values: whoami, cidrwhitelist, webhost, dns
+  ts-format: # string; timestamp format in the output file name, go-style: https://pkg.go.dev/time#pkg-constants
+  prefix:    # string; prefix for the results file; may include the absolute path to a directory (e.g.: /etc/prefix_);
+             #         result file path: prefix + ts-format
+  auto-exit: # bool; automatically exit dpich when checks are complete and report is saved
+
+
+# support utilities section:
+
+subnetfilter: # takes filters as input, returns sets of subnets (usually to webhostfarm); works locally without the internet
+  workers: # int; number of parallel workers that will process filters
+
+webhostfarm: # takes sets of subnets (usually from subnetfilter), returns suitable hosts (usually for the webhost checker)
+  workers:               # int; number of parallel workers that will process sets of subnets
+  tcp-conn-timeout:      # time.Duration; timeout for establishing a tcp connection
+  tls-handshake-timeout: # time.Duration; timeout for tls handshake
+
+inetutil: # used for all network operations (incl. tcp/tls operation and http requests)
+  iface:           # string; name of network interface or its ip address for network operations
+                   #         (currently, only ipv4 is supported)
+  fingerprint:     # string; specifies which browser fingerprint will be used for all tls connections;
+                   #         (if there is no individual option in the config for a specific tls connection);
+                   #         supported values: chrome (v133), firefox (v120), safari (v16.0), ios (v14),
+                   #                           android (v11), edge (v85), 360 (v7.5), qq (v11.1)
+  key-log-path:    # string; if set, the (pre)-master-secret log will be written to this path; useful for wireshark
+  browser-headers: # map[string]string; http headers that will be sent as part of requests
+
+updater: # used to automatically update the dpi-ch utility and related stuff (e.g., geoip)
+  enabled: # bool; if true, updates will be enabled
+  period:  # time.Duration; frequency of update checks (by default, no more than once per day)
+```
+
+## Flags
+The utility has some flags (command-line args) that can sometimes be useful:
+| Flag                        | Description                                                   |
+| --------------------------- | ------------------------------------------------------------- |
+| `--all`                     | Run all checks immediately (result to file)                   |
+| `--import-all :string`      | View saved ALL results from a json/yaml file                  |
+| `--cfg :string`             | `.yaml` config path (see [platform defaults](#configuration)) |
+| `--force-inetlookup-update` | Force run the `inetlookup` update mechanism                   |
+| `--force-update`            | Force run the `dpi-ch` update mechanism                       |
+| `--ui :string`              | UI mode: `t` \| `web` (default: `t`)                          |
+| `--version`                 | Print version                                                 |
+
+## Similar projects
+It so happens that similar projects (unrelated to ours) are under development at the same time, and we are happy to tell you about them.
+
+- [Runnin4ik/dpi-detector](https://github.com/Runnin4ik/dpi-detector) — _DPI detection tool for internet censorship testing_ (Python).
+
+## Third-Party Dependencies
+- [Loyalsoldier/geoip](https://github.com/Loyalsoldier/geoip)
+- [charmbracelet/bubbletea](https://github.com/charmbracelet/bubbletea)
+- [go4.org/netipx](https://go4.org/netipx)
+- [expr-lang/expr](https://github.com/expr-lang/expr)
+- [efraction-networking/utls](https://github.com/refraction-networking/utls)
+- [spf13/viper](https://github.com/spf13/viper)
+- [creativeprojects/go-selfupdate](https://github.com/creativeprojects/go-selfupdate)
