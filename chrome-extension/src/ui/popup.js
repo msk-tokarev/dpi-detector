@@ -39,6 +39,13 @@ function renderProbeItem(item) {
   `;
 }
 
+const RESTRICTED_BROWSER_HOSTS = new Set([
+  'chrome.google.com',
+  'chromewebstore.google.com',
+  'microsoftedge.microsoft.com',
+  'browser.yandex.ru',
+]);
+
 async function init() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   activeWindowId = tab?.windowId ?? null;
@@ -47,7 +54,14 @@ async function init() {
     const u = new URL(tab.url);
     activeHost = u.hostname;
     currentHostEl.textContent = activeHost;
-    hostBadgeEl.textContent = 'Готов';
+    if (RESTRICTED_BROWSER_HOSTS.has(activeHost.toLowerCase())) {
+      hostBadgeEl.className = 'badge warn';
+      hostBadgeEl.textContent = 'Защищён браузером';
+      btnProbe.disabled = true;
+      resultEl.innerHTML = `<div class="muted" style="color:var(--warn)">Браузер запрещает расширениям делать запросы к домену магазина <b>${activeHost}</b> (политика безопасности Chromium). Откройте любой обычный сайт или используйте «Полную панель».</div>`;
+    } else {
+      hostBadgeEl.textContent = 'Готов';
+    }
   } else {
     currentHostEl.textContent = 'Откройте обычный сайт (http/https)';
     btnProbe.disabled = true;

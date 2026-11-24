@@ -3,7 +3,7 @@ name: DPI Detector CI & Release
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'release/**']
   pull_request:
     branches: [main]
 
@@ -16,6 +16,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: '1.27'
+          cache-dependency-path: core/bridge/go.sum
       - name: Test mobile extensions in core/dpi-ch
         working-directory: core/dpi-ch
         run: |
@@ -61,14 +62,18 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
       - uses: actions/setup-go@v5
         with:
           go-version: '1.27'
-      - name: Setup Android SDK & NDK
-        uses: android-actions/setup-android@v3
-      - name: Install NDK and build dpich.aar
+          cache-dependency-path: core/bridge/go.sum
+      - name: Install Android SDK components & build dpich.aar
         run: |
-          sdkmanager "ndk;29.0.14206865" "platforms;android-36" "build-tools;36.1.0"
+          SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager | sort -V | tail -n 1)
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platform-tools" "platforms;android-36" "build-tools;36.1.0" "ndk;29.0.14206865"
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
           export PATH="$HOME/go/bin:$PATH"
@@ -78,7 +83,7 @@ jobs:
           gomobile bind -target=android/arm64,android/arm,android/amd64 -androidapi 26 -javapkg com.dpidetector.core -ldflags="-s -w" -o ../../android/app/libs/dpich.aar .
       - name: Run Unit + Compose UI tests & JaCoCo coverage
         working-directory: android
-        run: ./gradlew testDebugUnitTest jacocoTestReport --no-daemon
+        run: gradle testDebugUnitTest jacocoTestReport --no-daemon
       - uses: actions/upload-artifact@v4
         with:
           name: android-jacoco-report

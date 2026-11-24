@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"slices"
 	"strconv"
@@ -72,8 +73,10 @@ func Setup(filesDir, cacheDir, userYaml string) (err error) {
 		}
 	}
 	// Go on Android has no sane defaults for these.
-	os.Setenv("HOME", baseDir)
-	os.Setenv("TMPDIR", cacheDir)
+	if runtime.GOOS == "android" {
+		os.Setenv("HOME", baseDir)
+		os.Setenv("TMPDIR", cacheDir)
+	}
 	os.Setenv("XDG_DATA_HOME", dataHome)
 	os.Setenv("XDG_CONFIG_HOME", baseDir)
 
