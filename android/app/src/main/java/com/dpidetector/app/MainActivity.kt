@@ -1,12 +1,16 @@
 package com.dpidetector.app
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,12 +35,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.dpidetector.app.data.DpiEngine
 import com.dpidetector.app.ui.screens.HostProbeScreen
@@ -45,9 +51,16 @@ import com.dpidetector.app.ui.screens.ScannerScreen
 import com.dpidetector.app.ui.screens.SettingsScreen
 import com.dpidetector.app.ui.theme.DpiTheme
 import com.dpidetector.app.ui.theme.Palette
+import com.dpidetector.app.util.ExportFormat
+import kotlinx.coroutines.launch
 import java.io.File
 
 class MainActivity : ComponentActivity() {
+
+    private val notifPermLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* optional notification permission */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(Color.TRANSPARENT),
@@ -55,27 +68,49 @@ class MainActivity : ComponentActivity() {
         )
         super.onCreate(savedInstanceState)
 
+        requestNotificationPermissionIfNeeded()
+
         val engine = (application as DpiApp).engine
         setContent {
             DpiTheme {
                 DpiDetectorApp(
                     engine = engine,
-                    onShareReport = ::shareReportFile,
+                    onShareReport = { file -> shareFile(file, "application/json") },
+                    onShareFormattedFile = ::shareFile,
+                    onInstallApk = ::installApkFile,
                 )
             }
         }
     }
 
-    private fun shareReportFile(file: File) {
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                runCatching { notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS) }
+            }
+        }
+    }
+
+    private fun shareFile(file: File, mimeType: String) {
         if (!file.exists()) return
         val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
         val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "application/json"
+            type = mimeType
             putExtra(Intent.EXTRA_STREAM, uri)
-            putExtra(Intent.EXTRA_SUBJECT, "DPI Detector Report (${file.name})")
+            putExtra(Intent.EXTRA_SUBJECT, "DPI Detector (${file.name})")
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
-        startActivity(Intent.createChooser(intent, "Поделиться отчётом"))
+        startActivity(Intent.createChooser(intent, "Поделиться файлом"))
+    }
+
+    private fun installApkFile(file: File) {
+        if (!file.exists()) return
+        val uri = FileProvider.getUriForFile(this, "$packageName.files", file)
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        runCatching { startActivity(intent) }
     }
 }
 
@@ -86,9 +121,12 @@ private data class NavTab(val label: String, val icon: ImageVector)
 internal fun DpiDetectorApp(
     engine: DpiEngine,
     onShareReport: (File) -> Unit,
+    onShareFormattedFile: (File, String) -> Unit = { f, _ -> onShareReport(f) },
+    onInstallApk: (File) -> Unit = {},
 ) {
     val state by engine.state.collectAsState()
     val net by engine.networkMonitor.state.collectAsState()
+    val scope = rememberCoroutineScope()
     var tab by rememberSaveable { mutableIntStateOf(0) }
 
     val tabs = listOf(
@@ -97,6 +135,22 @@ internal fun DpiDetectorApp(
         NavTab("Отчёты", Icons.AutoMirrored.Filled.List),
         NavTab("Настройки", Icons.Default.Settings),
     )
+
+    val exportReportHandler: (File, ExportFormat) -> Unit = { reportFile, fmt ->
+        scope.launch {
+            engine.exportReportFile(reportFile, fmt).onSuccess { out ->
+                onShareFormattedFile(out, fmt.mime)
+            }
+        }
+    }
+
+    val exportBatchHandler: (ExportFormat) -> Unit = { fmt ->
+        scope.launch {
+            engine.exportBatchResults(fmt).onSuccess { out ->
+                onShareFormattedFile(out, fmt.mime)
+            }
+        }
+    }
 
     Scaffold(
         containerColor = Palette.Bg,
@@ -110,7 +164,7 @@ internal fun DpiDetectorApp(
                                 style = MaterialTheme.typography.titleLarge,
                             )
                             Text(
-                                text = "dpi-checkers · мобильный анализатор ТСПУ / DPI",
+                                text = "dpi-checkers · v${BuildConfig.VERSION_NAME} · by Ivan Tokarev",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = Palette.TextMuted,
                                 fontSize = 11.sp,
@@ -163,6 +217,7 @@ internal fun DpiDetectorApp(
                     onCancel = engine::cancelCheck,
                     onClearError = engine::clearError,
                     onShareReport = onShareReport,
+                    onExportReport = exportReportHandler,
                     onRetryGeo = { engine.loadGeo(force = true, allowOnline = true) },
                 )
 
@@ -170,6 +225,12 @@ internal fun DpiDetectorApp(
                     state = state,
                     onProbe = engine::probeCustomHost,
                     onClearHistory = engine::clearHostProbes,
+                    onStartBatch = { raw, port, sni, mode -> engine.startBatchScan(raw, port, sni, mode) },
+                    onPauseBatch = engine::pauseBatchScan,
+                    onResumeBatch = { engine.resumeBatchScan() },
+                    onRetryFailedBatch = { engine.retryFailedBatchItems() },
+                    onStopBatch = engine::stopBatchScan,
+                    onExportBatch = exportBatchHandler,
                 )
 
                 2 -> ReportsScreen(
@@ -178,6 +239,7 @@ internal fun DpiDetectorApp(
                     onLoadReport = engine::loadReport,
                     onDeleteReport = engine::deleteReport,
                     onShareReport = onShareReport,
+                    onExportReport = exportReportHandler,
                 )
 
                 3 -> SettingsScreen(
@@ -185,6 +247,9 @@ internal fun DpiDetectorApp(
                     onUpdateGeo = { engine.loadGeo(force = true, allowOnline = true) },
                     onSaveConfig = engine::saveUserConfig,
                     onLoadDefaultYaml = engine::loadDefaultConfigYaml,
+                    onCheckUpdates = { engine.checkForUpdates() },
+                    onDownloadUpdate = engine::downloadUpdate,
+                    onInstallUpdate = { path -> onInstallApk(File(path)) },
                 )
             }
         }

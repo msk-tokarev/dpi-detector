@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "DPI Детектор — ISP & Network Diagnostics",
   "short_name": "DPI Детектор",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "by Ivan Tokarev",
   "description": "Диагностика DPI-ограничений провайдера: TCP 16-20 (L4-25), CIDR WhiteList, DoH и доступность сервисов (dpi-checkers).",
   "homepage_url": "https://github.com/hyperion-cs/dpi-checkers",

@@ -20,7 +20,7 @@
   <div class="container">
     <div class="tabs">
       <button class="tab active" data-tab="scanner">Сканер</button>
-      <button class="tab" data-tab="host">Хост</button>
+      <button class="tab" data-tab="host">Хост / CIDR</button>
       <button class="tab" data-tab="reports">Отчёты</button>
       <button class="tab" data-tab="settings">Настройки</button>
     </div>
@@ -55,24 +55,39 @@
       </div>
     </section>
 
-    <!-- TAB: HOST PROBE -->
+    <!-- TAB: HOST PROBE & BATCH CIDR -->
     <section id="tab-host" class="container hidden" style="padding:0;">
       <div class="card">
-        <div class="card-title">Быстрая проверка своего хоста</div>
+        <div class="card-title">Быстрая проверка хоста (IPv4 / IPv6)</div>
         <div class="muted" style="margin-bottom:8px;">
-          Проверяет доступность и TCP 16-20 (L4-25) для любого домена или IPv4.
+          Проверяет доступность и TCP 16-20 (L4-25) для любого домена, IPv4 или IPv6.
         </div>
-        <input id="probe-input" class="input mono" placeholder="например, www.youtube.com или 1.1.1.1" />
+        <input id="probe-input" class="input mono" placeholder="youtube.com, 1.1.1.1 или 2606:4700:4700::1111" />
         <div class="wrap" style="margin:8px 0;">
           <span class="chip preset-chip" data-host="www.youtube.com">youtube.com</span>
           <span class="chip preset-chip" data-host="discord.com">discord.com</span>
           <span class="chip preset-chip" data-host="x.com">x.com</span>
           <span class="chip preset-chip" data-host="github.com">github.com</span>
           <span class="chip preset-chip" data-host="1.1.1.1">1.1.1.1</span>
+          <span class="chip preset-chip" data-host="2606:4700:4700::1111">2606:4700::1111</span>
         </div>
         <button id="btn-probe-host" class="btn btn-accent">Проверить хост</button>
       </div>
+
       <div id="probe-history" class="container" style="padding:0;"></div>
+
+      <div class="card">
+        <div class="card-title">Пакетный сканер списка / подсетей CIDR</div>
+        <div class="muted" style="margin-bottom:8px;">
+          Домены, IPv4/IPv6, диапазоны (1.1.1.1-5) или подсети CIDR (104.16.0.0/30). Очередь сохраняется при закрытии панели.
+        </div>
+        <textarea id="batch-input" class="input mono" rows="4" placeholder="www.youtube.com&#10;discord.com&#10;1.1.1.0/30"></textarea>
+        <div id="cidr-calc-hint" class="mono muted" style="margin-top:6px;color:var(--accent);"></div>
+        <button id="btn-start-batch" class="btn btn-primary" style="margin-top:8px;">Запустить очередь</button>
+        <div id="batch-error" class="muted" style="color:var(--bad);margin-top:6px;"></div>
+      </div>
+
+      <div id="batch-status-card" class="card hidden"></div>
     </section>
 
     <!-- TAB: REPORTS -->
@@ -81,7 +96,7 @@
         <div class="row">
           <div>
             <div class="card-title" style="margin:0;">Сохранённые отчёты</div>
-            <div class="muted">Формат JSON совместим с dpich --import-all</div>
+            <div class="muted">Экспорт в JSON (dpich), CSV и TXT</div>
           </div>
           <button id="btn-refresh-reports" class="btn btn-outline btn-sm">Обновить</button>
         </div>
@@ -107,7 +122,7 @@
 
       <div class="card">
         <div class="card-title">Пользовательские хосты (по одному на строку)</div>
-        <textarea id="custom-hosts" class="input mono" rows="4" placeholder="my-vps.example.com&#10;1.1.1.1"></textarea>
+        <textarea id="custom-hosts" class="input mono" rows="4" placeholder="my-vps.example.com&#10;1.1.1.1&#10;2606:4700:4700::1111"></textarea>
         <button id="btn-save-settings" class="btn btn-primary" style="margin-top:8px;">Сохранить настройки</button>
       </div>
 
@@ -115,13 +130,14 @@
         <div class="card-title">О расширении</div>
         <div class="muted">
           <div><strong>Авторы:</strong> by Ivan Tokarev</div>
+          <div><strong>Версия:</strong> 1.1.0</div>
           <div><strong>Движок:</strong> hyperion-cs/dpi-checkers (Apache-2.0)</div>
           <div><strong>Приватность:</strong> Все проверки выполняются локально с вашего браузера; никакие данные никуда не отправляются.</div>
         </div>
       </div>
     </section>
 
-    <div class="footer-credit">DPI Детектор v1.0 · by Ivan Tokarev</div>
+    <div class="footer-credit">DPI Детектор v1.1 · by Ivan Tokarev</div>
   </div>
 
   <script type="module" src="src/ui/sidepanel.js"></script>

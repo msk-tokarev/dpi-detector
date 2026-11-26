@@ -1,6 +1,7 @@
 package com.dpidetector.app.data
 
 import android.content.Context
+import com.dpidetector.app.BuildConfig
 import com.dpidetector.app.model.DnsLeak
 import com.dpidetector.app.model.DnsReport
 import com.dpidetector.app.model.Results
@@ -10,15 +11,24 @@ import com.dpidetector.app.model.TaskState
 import com.dpidetector.app.model.WebhostItem
 import com.dpidetector.app.model.Whoami
 import com.dpidetector.app.model.objects
+import com.dpidetector.app.service.DpiForegroundService
+import com.dpidetector.app.util.CidrExpandMode
+import com.dpidetector.app.util.ExportFormat
+import com.dpidetector.app.util.ReportExporter
+import com.dpidetector.app.util.SubnetPlanner
 import com.dpidetector.core.dpich.EventListener
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -78,6 +88,8 @@ data class EngineUiState(
     val hostProbeBusy: Boolean = false,
     val hostProbes: List<HostProbeEntry> = emptyList(),
     val userYaml: String = "",
+    val batch: BatchScanUiState = BatchScanUiState(),
+    val updater: UpdaterUiState = UpdaterUiState(),
 )
 
 class DpiEngine(
@@ -86,6 +98,9 @@ class DpiEngine(
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
     val networkMonitor: NetworkMonitor = NetworkMonitor(appContext),
     autoStart: Boolean = true,
+    private val batchStore: BatchScanStore = BatchScanStore(appContext),
+    private val updateTransport: UpdateHttpTransport = DefaultUpdateHttpTransport,
+    private val enableForegroundSync: Boolean = false,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private val prefs = appContext.getSharedPreferences("dpidetector_prefs", Context.MODE_PRIVATE)
@@ -94,6 +109,11 @@ class DpiEngine(
     val state: StateFlow<EngineUiState> = _state.asStateFlow()
 
     private val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+    private val fileTsFmt = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.US)
+
+    private var batchJob: Job? = null
+    private val recentBatchDurationsMs = ArrayDeque<Long>()
+    private val etaLock = Any()
 
     private val listener = EventListener { raw ->
         handleEvent(raw)
@@ -104,6 +124,12 @@ class DpiEngine(
             scope.launch {
                 bootstrap()
             }
+        }
+    }
+
+    private fun syncForeground() {
+        if (enableForegroundSync) {
+            DpiForegroundService.sync(appContext, _state.value)
         }
     }
 
@@ -122,6 +148,10 @@ class DpiEngine(
             return
         }
 
+        val recovered = runCatching { batchStore.recoverInterrupted() }.getOrDefault(false)
+        val initialBatch = runCatching { batchStore.snapshot(recoveredAfterRestart = recovered) }
+            .getOrDefault(BatchScanUiState())
+
         val sections = parseSections(gateway.sections())
         _state.update {
             it.copy(
@@ -129,6 +159,7 @@ class DpiEngine(
                 initError = null,
                 sections = sections,
                 selectedSections = sections.map { s -> s.index }.toSet(),
+                batch = initialBatch,
             )
         }
 
@@ -233,6 +264,7 @@ class DpiEngine(
                 logs = listOf(stamp("Запуск проверки…")),
             )
         }
+        syncForeground()
 
         scope.launch {
             try {
@@ -244,6 +276,7 @@ class DpiEngine(
                         errorBanner = t.message ?: "Не удалось запустить проверку",
                     )
                 }
+                syncForeground()
             }
         }
     }
@@ -267,13 +300,14 @@ class DpiEngine(
         _state.update { it.copy(hostProbeBusy = true) }
         scope.launch {
             val now = System.currentTimeMillis()
+            val validPort = if (port in 1..65535) port else 443
             val entry = try {
-                val json = gateway.checkCustomHost(clean, sni.trim(), port)
+                val json = gateway.checkCustomHost(clean, sni.trim(), validPort)
                 val item = WebhostItem.from(JSONObject(json))
                 HostProbeEntry(
                     id = now,
                     query = clean,
-                    port = if (port in 1..65535) port else 443,
+                    port = validPort,
                     sni = sni.trim(),
                     timestamp = now,
                     item = item,
@@ -282,7 +316,7 @@ class DpiEngine(
                 HostProbeEntry(
                     id = now,
                     query = clean,
-                    port = if (port in 1..65535) port else 443,
+                    port = validPort,
                     sni = sni.trim(),
                     timestamp = now,
                     error = t.message ?: "Ошибка проверки",
@@ -300,6 +334,143 @@ class DpiEngine(
     fun clearHostProbes() {
         _state.update { it.copy(hostProbes = emptyList()) }
     }
+
+    // -------------------------------------------------------------------------
+    // Batch / CIDR Queue Scanner (with Pause, Resume, ETA & Crash Recovery)
+    // -------------------------------------------------------------------------
+
+    fun startBatchScan(
+        rawTargets: String,
+        port: Int = 443,
+        sni: String = "",
+        mode: CidrExpandMode = CidrExpandMode.USABLE,
+        concurrency: Int = 2,
+    ) {
+        if (_state.value.batch.status == BatchJobStatus.RUNNING) return
+        val expanded = SubnetPlanner.expandTargets(rawTargets, mode)
+        expanded.onFailure { err ->
+            _state.update { it.copy(errorBanner = err.message ?: "Некорректный список целей") }
+            return
+        }
+        val targets = expanded.getOrThrow()
+        val validPort = if (port in 1..65535) port else 443
+        synchronized(etaLock) { recentBatchDurationsMs.clear() }
+        batchStore.replaceQueue(targets, validPort, sni.trim())
+        _state.update {
+            it.copy(
+                errorBanner = null,
+                batch = batchStore.snapshot(etaSeconds = null, recoveredAfterRestart = false),
+            )
+        }
+        syncForeground()
+        launchBatchWorkers(concurrency.coerceIn(1, 4))
+    }
+
+    fun pauseBatchScan() {
+        if (_state.value.batch.status != BatchJobStatus.RUNNING) return
+        batchJob?.cancel()
+        batchJob = null
+        batchStore.resetRunningToQueued()
+        batchStore.setJobStatus(BatchJobStatus.PAUSED)
+        _state.update { it.copy(batch = batchStore.snapshot(etaSeconds = null, recoveredAfterRestart = false)) }
+        syncForeground()
+    }
+
+    fun resumeBatchScan(concurrency: Int = 2) {
+        val st = _state.value.batch.status
+        if (st != BatchJobStatus.PAUSED && st != BatchJobStatus.COMPLETED) return
+        batchStore.resetRunningToQueued()
+        batchStore.setJobStatus(BatchJobStatus.RUNNING)
+        _state.update { it.copy(batch = batchStore.snapshot(etaSeconds = null, recoveredAfterRestart = false)) }
+        syncForeground()
+        launchBatchWorkers(concurrency.coerceIn(1, 4))
+    }
+
+    fun retryFailedBatchItems(concurrency: Int = 2) {
+        if (_state.value.batch.status == BatchJobStatus.RUNNING) return
+        val count = batchStore.retryFailed()
+        if (count <= 0) return
+        batchStore.setJobStatus(BatchJobStatus.RUNNING)
+        _state.update { it.copy(batch = batchStore.snapshot(etaSeconds = null, recoveredAfterRestart = false)) }
+        syncForeground()
+        launchBatchWorkers(concurrency.coerceIn(1, 4))
+    }
+
+    fun stopBatchScan() {
+        batchJob?.cancel()
+        batchJob = null
+        synchronized(etaLock) { recentBatchDurationsMs.clear() }
+        batchStore.clearAll()
+        _state.update { it.copy(batch = BatchScanUiState()) }
+        syncForeground()
+    }
+
+    private fun launchBatchWorkers(workerCount: Int) {
+        batchJob?.cancel()
+        batchJob = scope.launch {
+            try {
+                val workers = (0 until workerCount).map {
+                    launch {
+                        while (isActive) {
+                            val claimed = batchStore.claimNextQueued() ?: break
+                            val t0 = System.currentTimeMillis()
+                            try {
+                                val rawJson = gateway.checkCustomHost(claimed.target, claimed.sni, claimed.port)
+                                batchStore.markItemResult(
+                                    idx = claimed.idx,
+                                    state = BatchItemState.DONE,
+                                    resultJson = rawJson,
+                                    errorMsg = null,
+                                )
+                            } catch (ce: CancellationException) {
+                                throw ce
+                            } catch (t: Throwable) {
+                                batchStore.markItemResult(
+                                    idx = claimed.idx,
+                                    state = BatchItemState.FAILED,
+                                    resultJson = null,
+                                    errorMsg = t.message ?: "Ошибка проверки",
+                                )
+                            }
+                            val elapsed = (System.currentTimeMillis() - t0).coerceAtLeast(1L)
+                            val etaSec = computeBatchEtaSeconds(elapsed, workerCount)
+                            _state.update { cur ->
+                                cur.copy(batch = batchStore.snapshot(etaSeconds = etaSec, recoveredAfterRestart = false))
+                            }
+                            syncForeground()
+                        }
+                    }
+                }
+                workers.joinAll()
+                if (isActive && _state.value.batch.status == BatchJobStatus.RUNNING) {
+                    batchStore.setJobStatus(BatchJobStatus.COMPLETED)
+                    _state.update { cur ->
+                        cur.copy(batch = batchStore.snapshot(etaSeconds = null, recoveredAfterRestart = false))
+                    }
+                    syncForeground()
+                }
+            } catch (_: CancellationException) {
+                // Paused or stopped cleanly
+            }
+        }
+    }
+
+    private fun computeBatchEtaSeconds(latestMs: Long, workerCount: Int): Long? {
+        val snap = _state.value.batch
+        val remaining = (snap.total - snap.completed - 1).coerceAtLeast(0)
+        if (remaining <= 0) return null
+        val avgMs = synchronized(etaLock) {
+            if (recentBatchDurationsMs.size >= 8) recentBatchDurationsMs.removeFirst()
+            recentBatchDurationsMs.addLast(latestMs)
+            if (recentBatchDurationsMs.size < 2) return null
+            recentBatchDurationsMs.average()
+        }
+        return ((avgMs * remaining) / workerCount.coerceAtLeast(1) / 1000.0).toLong().coerceAtLeast(1L)
+    }
+
+    // -------------------------------------------------------------------------
+    // Reports & Multi-Format Export (JSON / CSV / TXT)
+    // -------------------------------------------------------------------------
 
     fun refreshReports() {
         scope.launch {
@@ -320,12 +491,142 @@ class DpiEngine(
         }
     }
 
+    suspend fun exportReportFile(reportJsonFile: File, format: ExportFormat): Result<File> = withContext(ioDispatcher) {
+        runCatching {
+            if (format == ExportFormat.JSON) return@runCatching reportJsonFile
+            val parsed = Results.fromReport(JSONObject(reportJsonFile.readText()))
+            val baseName = reportJsonFile.nameWithoutExtension
+            val outDir = File(appContext.cacheDir, "exports").apply { mkdirs() }
+            val outFile = File(outDir, "$baseName.${format.ext}")
+            val content = when (format) {
+                ExportFormat.CSV -> ReportExporter.resultsToCsv(parsed)
+                ExportFormat.TXT -> ReportExporter.resultsToTxt(parsed, baseName)
+                ExportFormat.JSON -> reportJsonFile.readText()
+            }
+            outFile.writeText(content)
+            outFile
+        }
+    }
+
+    suspend fun exportBatchResults(format: ExportFormat): Result<File> = withContext(ioDispatcher) {
+        runCatching {
+            val items = _state.value.batch.items
+            require(items.isNotEmpty()) { "Нет данных пакетного сканирования для экспорта" }
+            val outDir = File(appContext.cacheDir, "exports").apply { mkdirs() }
+            val outFile = File(outDir, "batch_${fileTsFmt.format(Date())}.${format.ext}")
+            val content = when (format) {
+                ExportFormat.CSV -> ReportExporter.batchToCsv(items)
+                ExportFormat.TXT -> ReportExporter.batchToTxt(items)
+                ExportFormat.JSON -> ReportExporter.batchToJson(items)
+            }
+            outFile.writeText(content)
+            outFile
+        }
+    }
+
     fun deleteReport(file: File) {
         scope.launch {
             runCatching { file.delete() }
             refreshReports()
         }
     }
+
+    // -------------------------------------------------------------------------
+    // In-App GitHub Release APK Updater (with SHA-256 verification)
+    // -------------------------------------------------------------------------
+
+    fun checkForUpdates(currentVersion: String = BuildConfig.VERSION_NAME) {
+        if (_state.value.updater.checking || _state.value.updater.downloading) return
+        _state.update {
+            it.copy(
+                updater = it.updater.copy(
+                    checking = true,
+                    error = null,
+                    upToDate = false,
+                ),
+            )
+        }
+        scope.launch {
+            try {
+                val info = AppUpdater.checkLatest(
+                    currentVersion = currentVersion,
+                    transport = updateTransport,
+                )
+                _state.update {
+                    it.copy(
+                        updater = it.updater.copy(
+                            checking = false,
+                            availableUpdate = info,
+                            upToDate = info == null,
+                            downloadedApkPath = null,
+                            verifiedSha256 = null,
+                            error = null,
+                        ),
+                    )
+                }
+            } catch (t: Throwable) {
+                _state.update {
+                    it.copy(
+                        updater = it.updater.copy(
+                            checking = false,
+                            error = t.message ?: "Не удалось проверить обновления",
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    fun downloadUpdate() {
+        val info = _state.value.updater.availableUpdate ?: return
+        if (_state.value.updater.downloading) return
+        _state.update {
+            it.copy(
+                updater = it.updater.copy(
+                    downloading = true,
+                    progressPercent = 0,
+                    error = null,
+                ),
+            )
+        }
+        scope.launch {
+            try {
+                val updatesDir = File(appContext.cacheDir, "updates")
+                val (apkFile, sha) = AppUpdater.downloadAndVerify(
+                    info = info,
+                    updatesDir = updatesDir,
+                    transport = updateTransport,
+                    onProgress = { pct ->
+                        _state.update { s -> s.copy(updater = s.updater.copy(progressPercent = pct)) }
+                    },
+                )
+                _state.update {
+                    it.copy(
+                        updater = it.updater.copy(
+                            downloading = false,
+                            progressPercent = 100,
+                            downloadedApkPath = apkFile.absolutePath,
+                            verifiedSha256 = sha,
+                            error = null,
+                        ),
+                    )
+                }
+            } catch (t: Throwable) {
+                _state.update {
+                    it.copy(
+                        updater = it.updater.copy(
+                            downloading = false,
+                            error = t.message ?: "Ошибка скачивания обновления",
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // User config.yaml
+    // -------------------------------------------------------------------------
 
     suspend fun saveUserConfig(yaml: String): String? = withContext(ioDispatcher) {
         if (_state.value.running) return@withContext "Остановите текущую проверку перед изменением конфига"
@@ -380,6 +681,7 @@ class DpiEngine(
                     tasks["dnsDoh"] = TaskState.RUNNING
                 }
                 _state.update { it.copy(results = Results(sections = secList, tasks = tasks)) }
+                syncForeground()
             }
 
             "task" -> {
@@ -398,6 +700,7 @@ class DpiEngine(
                         cur.copy(results = cur.results.copy(tasks = tasks))
                     }
                 }
+                syncForeground()
             }
 
             "whoami" -> {
@@ -479,6 +782,7 @@ class DpiEngine(
                         results = cur.results.copy(tasks = fixedTasks, sections = fixedSections),
                     )
                 }
+                syncForeground()
                 if (path != null) refreshReports()
             }
         }

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -21,6 +22,7 @@ import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -42,6 +44,7 @@ import com.dpidetector.app.ui.components.SectionHeader
 import com.dpidetector.app.ui.components.StatusBadge
 import com.dpidetector.app.ui.theme.MonoFamily
 import com.dpidetector.app.ui.theme.Palette
+import com.dpidetector.app.util.ExportFormat
 import kotlinx.coroutines.launch
 import java.io.File
 import java.text.SimpleDateFormat
@@ -55,6 +58,7 @@ fun ReportsScreen(
     onLoadReport: suspend (File) -> Result<Results>,
     onDeleteReport: (File) -> Unit,
     onShareReport: (File) -> Unit,
+    onExportReport: (File, ExportFormat) -> Unit = { f, _ -> onShareReport(f) },
 ) {
     val scope = rememberCoroutineScope()
     var openedFile by remember { mutableStateOf<File?>(null) }
@@ -96,6 +100,21 @@ fun ReportsScreen(
                 }
             }
 
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ExportFormat.entries.forEach { fmt ->
+                    OutlinedButton(
+                        onClick = { onExportReport(openedFile!!, fmt) },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
+                    ) {
+                        Text(fmt.label, fontFamily = MonoFamily, fontSize = 12.sp)
+                    }
+                }
+            }
+
             ResultsDashboard(results = openedResults!!, running = false)
             Spacer(Modifier.height(16.dp))
         }
@@ -111,7 +130,7 @@ fun ReportsScreen(
     ) {
         SectionHeader(
             title = "Сохранённые отчёты (${reports.size})",
-            subtitle = "Формат JSON полностью совместим с dpich --import-all",
+            subtitle = "Экспорт в JSON (dpich --import-all), CSV и TXT",
             trailing = {
                 IconButton(onClick = onRefresh) {
                     Icon(Icons.Default.Refresh, contentDescription = "Обновить", tint = Palette.TextSecondary)
@@ -191,6 +210,26 @@ fun ReportsScreen(
                         }
                         IconButton(onClick = { onDeleteReport(rep.file) }) {
                             Icon(Icons.Default.Delete, contentDescription = "Удалить", tint = Palette.TextMuted, modifier = Modifier.size(20.dp))
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = { onExportReport(rep.file, ExportFormat.CSV) },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp),
+                        ) {
+                            Text("CSV", fontFamily = MonoFamily, fontSize = 11.sp)
+                        }
+                        OutlinedButton(
+                            onClick = { onExportReport(rep.file, ExportFormat.TXT) },
+                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(8.dp),
+                        ) {
+                            Text("TXT", fontFamily = MonoFamily, fontSize = 11.sp)
                         }
                     }
                 }

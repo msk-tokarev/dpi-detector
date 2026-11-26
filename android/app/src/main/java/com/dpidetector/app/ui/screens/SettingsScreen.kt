@@ -22,6 +22,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -60,6 +61,9 @@ fun SettingsScreen(
     onUpdateGeo: () -> Unit,
     onSaveConfig: suspend (String) -> String?,
     onLoadDefaultYaml: suspend () -> String,
+    onCheckUpdates: () -> Unit = {},
+    onDownloadUpdate: () -> Unit = {},
+    onInstallUpdate: (String) -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     var yamlDraft by remember { mutableStateOf(state.userYaml) }
@@ -80,6 +84,101 @@ fun SettingsScreen(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        // In-App GitHub Release Updater Card
+        val upd = state.updater
+        PanelCard {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Text("Обновление APK (GitHub)", style = MaterialTheme.typography.titleMedium)
+                when {
+                    upd.availableUpdate != null -> StatusBadge("Доступна ${upd.availableUpdate.tagName}", Status.Level.WARN)
+                    upd.upToDate -> StatusBadge("Актуальна", Status.Level.GOOD)
+                    else -> StatusBadge("v${upd.currentVersion}", Status.Level.NEUTRAL)
+                }
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "Проверяет новые релизы на GitHub (msk-tokarev/dpi-detector), автоматически выбирает архитектуру вашего процессора и сверяет контрольную сумму SHA-256 перед установкой.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+
+            if (upd.error != null) {
+                Spacer(Modifier.height(6.dp))
+                Text(upd.error, color = Palette.Bad, style = MaterialTheme.typography.bodySmall)
+            }
+
+            if (upd.availableUpdate != null) {
+                val rel = upd.availableUpdate
+                Spacer(Modifier.height(8.dp))
+                DetailRow("Пакет", rel.apkName, mono = true)
+                if (rel.expectedSha256 != null) {
+                    DetailRow("SHA-256", "${rel.expectedSha256.take(16)}…", mono = true)
+                }
+                if (upd.downloading) {
+                    Spacer(Modifier.height(8.dp))
+                    LinearProgressIndicator(
+                        progress = { upd.progressPercent / 100f },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = Palette.Good,
+                        trackColor = Palette.SurfaceAlt,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text("Скачивание и проверка SHA-256: ${upd.progressPercent}%", style = MaterialTheme.typography.bodySmall)
+                } else if (upd.downloadedApkPath != null) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        text = "SHA-256 проверен (${upd.verifiedSha256?.take(12)}…) — файл готов к установке",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Palette.Good,
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Button(
+                        onClick = { onInstallUpdate(upd.downloadedApkPath) },
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Palette.Good, contentColor = Palette.Bg),
+                    ) {
+                        Text("Установить обновление APK", fontWeight = FontWeight.SemiBold)
+                    }
+                } else {
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = onDownloadUpdate,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Palette.Accent, contentColor = Palette.Bg),
+                    ) {
+                        Text("Скачать и проверить ${rel.tagName}", fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            } else {
+                Spacer(Modifier.height(10.dp))
+                Button(
+                    onClick = onCheckUpdates,
+                    enabled = !upd.checking && !upd.downloading,
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Palette.SurfaceAlt,
+                        contentColor = Palette.Good,
+                    ),
+                ) {
+                    if (upd.checking) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp, color = Palette.Good)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Проверяем релизы…")
+                    } else {
+                        Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Проверить обновления на GitHub")
+                    }
+                }
+            }
+        }
+
         // GeoLite DB card
         PanelCard {
             Row(

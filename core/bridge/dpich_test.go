@@ -72,7 +72,7 @@ func selfSignedCert(t *testing.T, dnsNames []string) tls.Certificate {
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: dnsNames[0]},
 		DNSNames:     dnsNames,
-		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature,
@@ -295,9 +295,6 @@ func TestCheckCustomHostAllBranches(t *testing.T) {
 	if _, err := CheckCustomHost("   ", "", 443); err == nil {
 		t.Fatal("expected error for empty target")
 	}
-	if _, err := CheckCustomHost("::1", "", 443); err == nil {
-		t.Fatal("expected error for IPv6 address")
-	}
 	if _, err := CheckCustomHost("nonexistent.invalid.local.test", "", 0); err == nil {
 		t.Fatal("expected DNS resolution error for nonexistent domain")
 	}
@@ -319,6 +316,52 @@ func TestCheckCustomHostAllBranches(t *testing.T) {
 	}
 	if cleanDto.Tls == nil || cleanDto.Tls.Cn != "mock.local" {
 		t.Fatalf("expected cert CN=mock.local, got %+v", cleanDto.Tls)
+	}
+
+	// host:port extraction when port <= 0
+	rawWithPort, err := CheckCustomHost(fmt.Sprintf("127.0.0.1:%d", cleanPort), "mock.local", 0)
+	if err != nil {
+		t.Fatalf("CheckCustomHost host:port failed: %v", err)
+	}
+	var portDto fullcheck.WebhostItemDto
+	if err := json.Unmarshal([]byte(rawWithPort), &portDto); err != nil || portDto.Alive.Code != "OK" {
+		t.Fatalf("unexpected host:port result: err=%v dto=%+v", err, portDto)
+	}
+
+	// IPv6 target ([::1]:port and raw ::1) if IPv6 loopback is available on runner
+	if v6Ln, v6Err := tls.Listen("tcp6", "[::1]:0", &tls.Config{
+		Certificates: []tls.Certificate{selfSignedCert(t, []string{"mock.local"})},
+		MinVersion:   tls.VersionTLS12,
+	}); v6Err == nil {
+		v6Srv := &http.Server{
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("ok6"))
+			}),
+		}
+		go v6Srv.Serve(v6Ln)
+		defer v6Srv.Close()
+		defer v6Ln.Close()
+		v6Port := v6Ln.Addr().(*net.TCPAddr).Port
+
+		rawV6, err := CheckCustomHost(fmt.Sprintf("https://[::1]:%d/v6path", v6Port), "mock.local", 0)
+		if err != nil {
+			t.Fatalf("CheckCustomHost IPv6 bracketed failed: %v", err)
+		}
+		var v6Dto fullcheck.WebhostItemDto
+		if err := json.Unmarshal([]byte(rawV6), &v6Dto); err != nil || v6Dto.Alive.Code != "OK" || v6Dto.IP != "::1" {
+			t.Fatalf("unexpected IPv6 result: err=%v dto=%+v", err, v6Dto)
+		}
+
+		// Raw IPv6 without SNI (verifies RFC 3986 [::1] Host header branch)
+		rawV6NoSni, err := CheckCustomHost("::1", "", int32(v6Port))
+		if err != nil {
+			t.Fatalf("CheckCustomHost raw ::1 failed: %v", err)
+		}
+		if err := json.Unmarshal([]byte(rawV6NoSni), &v6Dto); err != nil || v6Dto.IP != "::1" {
+			t.Fatalf("unexpected raw ::1 result: err=%v dto=%+v", err, v6Dto)
+		}
 	}
 
 	// Hostname resolution path ("localhost" -> 127.0.0.1)

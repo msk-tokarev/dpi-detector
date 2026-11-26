@@ -59,6 +59,7 @@ import com.dpidetector.app.ui.components.TaskPill
 import com.dpidetector.app.ui.components.localizeSectionName
 import com.dpidetector.app.ui.theme.MonoFamily
 import com.dpidetector.app.ui.theme.Palette
+import com.dpidetector.app.util.ExportFormat
 import java.io.File
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -73,6 +74,7 @@ fun ScannerScreen(
     onClearError: () -> Unit,
     onShareReport: (File) -> Unit,
     onRetryGeo: () -> Unit,
+    onExportReport: (File, ExportFormat) -> Unit = { f, _ -> onShareReport(f) },
 ) {
     var showLog by remember { mutableStateOf(false) }
     var showModules by remember { mutableStateOf(true) }
@@ -322,12 +324,13 @@ fun ScannerScreen(
                 }
             }
 
-            // Share button after finish
+            // Share / Export buttons after finish
             val savedPath = state.lastReportPath
             if (!state.running && savedPath != null) {
+                val repFile = File(savedPath)
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
-                    onClick = { onShareReport(File(savedPath)) },
+                    onClick = { onShareReport(repFile) },
                     modifier = Modifier.fillMaxWidth(),
                     shape = RoundedCornerShape(12.dp),
                     contentPadding = PaddingValues(vertical = 10.dp),
@@ -335,6 +338,26 @@ fun ScannerScreen(
                     Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
                     Text("Поделиться отчётом JSON (dpi-ch формат)")
+                }
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = { onExportReport(repFile, ExportFormat.CSV) },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
+                    ) {
+                        Text("Экспорт CSV", fontFamily = MonoFamily, fontSize = 12.sp)
+                    }
+                    OutlinedButton(
+                        onClick = { onExportReport(repFile, ExportFormat.TXT) },
+                        modifier = Modifier.weight(1f),
+                        shape = RoundedCornerShape(10.dp),
+                    ) {
+                        Text("Экспорт TXT", fontFamily = MonoFamily, fontSize = 12.sp)
+                    }
                 }
             }
         }

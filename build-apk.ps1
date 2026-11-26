@@ -48,6 +48,7 @@ $outDir = "$root\dist"
 New-Item -ItemType Directory -Force $outDir | Out-Null
 $apkDir = if ($DebugBuild) { "$root\android\app\build\outputs\apk\debug" } else { "$root\android\app\build\outputs\apk\release" }
 Get-ChildItem $apkDir -Filter "*.apk" | ForEach-Object {
-    Copy-Item $_.FullName "$outDir\$($_.Name)" -Force
-    Write-Host "APK: $outDir\$($_.Name) ($([Math]::Round($_.Length / 1MB, 2)) MB)" -ForegroundColor Green
+    $outName = $_.Name -replace '^app-', 'dpi-detector-' -replace '-release\.apk$', '.apk'
+    Copy-Item $_.FullName "$outDir\$outName" -Force
+    Write-Host "APK: $outDir\$outName ($([Math]::Round($_.Length / 1MB, 2)) MB)" -ForegroundColor Green
 }

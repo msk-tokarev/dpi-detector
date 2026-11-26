@@ -16,6 +16,19 @@ import {
   parseMailExternalIp,
 } from '../src/background/checkers.js';
 import { CIDR_WHITELIST_SUITE, DOH_PROVIDERS, WEBHOST_SUITE } from '../src/shared/suites.js';
+import {
+  batchToCsv,
+  batchToTxt,
+  csvCell,
+  describeCidr,
+  expandTargets,
+  ipv4FromInt,
+  ipv6FromBigInt,
+  parseIpv4Int,
+  parseIpv6BigInt,
+  reportToCsv,
+  reportToTxt,
+} from '../src/shared/batch-export.js';
 
 function makeDnsResponseBytes({ rcode = 0, ips = ['1.1.1.1'] } = {}) {
   const q = encodeDnsQueryA('example.com', 0x4242);
@@ -91,9 +104,17 @@ test('helpers: createRandomPayload, isAbortOrTimeout, parseMailExternalIp, norma
   assert.equal(isPublicIp('224.0.0.1'), false);
   assert.equal(isPublicIp('999.1.1.1'), false);
   assert.equal(isPublicIp('not-an-ip'), false);
+  assert.equal(isPublicIp('2606:4700:4700::1111'), true);
+  assert.equal(isPublicIp('[2606:4700:4700::1111]'), true);
+  assert.equal(isPublicIp('::1'), false);
+  assert.equal(isPublicIp('fe80::1'), false);
+  assert.equal(isPublicIp('fd00::1'), false);
+  assert.equal(isPublicIp('bad:ipv6:zzz'), false);
 
   assert.equal(normalizeTargetHost('https://example.com/foo/bar'), 'example.com');
   assert.equal(normalizeTargetHost('http://1.1.1.1/'), '1.1.1.1');
+  assert.equal(normalizeTargetHost('2606:4700:4700::1111'), '[2606:4700:4700::1111]');
+  assert.equal(normalizeTargetHost('https://[2606:4700:4700::1111]/test'), '[2606:4700:4700::1111]');
 });
 
 test('checkWhoami succeeds via Mail API + RIPE enrichment and handles fallback/failure', async () => {
@@ -300,4 +321,81 @@ test('buildDpichReport generates upstream-compatible Version 1 schema', () => {
   assert.equal(rep.CidrWhitelist.Status.Code, 'NOT_DETECTED');
   assert.ok(rep.Dns.Doh.Providers.Cloudflare);
   assert.ok(rep.Webhost.Popular);
+});
+
+test('batch-export covers IPv4/IPv6 CIDR, ranges, CSV/TXT report and batch formatting', () => {
+  assert.equal(parseIpv4Int('999.0.0.1'), null);
+  assert.equal(ipv4FromInt(parseIpv4Int('104.16.0.5')), '104.16.0.5');
+
+  assert.equal(parseIpv6BigInt('not-v6'), null);
+  assert.equal(parseIpv6BigInt('1:2::3::4'), null);
+  assert.equal(parseIpv6BigInt('1:2:3'), null);
+  assert.equal(parseIpv6BigInt('1:2:3:4:5:6:7:8::9'), null);
+  assert.equal(parseIpv6BigInt('12345::1'), null);
+  const fullV6 = parseIpv6BigInt('2606:4700:4700:0:0:0:0:1111');
+  assert.equal(ipv6FromBigInt(fullV6), '2606:4700:4700::1111');
+
+  assert.equal(describeCidr('bad'), null);
+  assert.equal(describeCidr('1.1.1.1/abc'), null);
+  assert.equal(describeCidr('1.1.1.1/40'), null);
+  assert.equal(describeCidr('2606:4700::/200'), null);
+  assert.equal(describeCidr('example.com/24'), null);
+
+  const c0 = describeCidr('0.0.0.0/0');
+  assert.equal(c0.prefixLength, 0);
+  const c32 = describeCidr('1.1.1.1/32');
+  assert.equal(c32.usableCount, 1);
+  const v6Exact = describeCidr('2606:4700:4700::1111/128');
+  assert.equal(v6Exact.totalCount, 1);
+  const v6Huge = describeCidr('2606:4700::/32');
+  assert.equal(v6Huge.totalCount, Number.MAX_SAFE_INTEGER);
+
+  const targets = expandTargets(`
+    # comment
+    https://youtube.com/watch, 104.16.0.0/30
+    1.1.1.1-2; 1.1.1.10-1.1.1.11
+    2606:4700:4700::1111
+    2606:4700:4700::/127
+  `);
+  assert.ok(targets.includes('youtube.com'));
+  assert.ok(targets.includes('104.16.0.1'));
+  assert.ok(!targets.includes('104.16.0.0'));
+  assert.ok(targets.includes('[2606:4700:4700::1111]'));
+
+  const allCidr = expandTargets('104.16.0.0/30', { usableOnly: false });
+  assert.equal(allCidr.length, 4);
+
+  assert.throws(() => expandTargets('   '), /хотя бы один/);
+  assert.throws(() => expandTargets('example.com/24'), /Некорректная подсеть/);
+  assert.throws(() => expandTargets('10.0.0.0/16', { maxTotal: 50 }), /превышает лимит/);
+  assert.throws(() => expandTargets('1.1.1.5-1.1.1.2'), /Некорректный диапазон/);
+  assert.throws(() => expandTargets('1.1.1.1-1.1.1.50', { maxTotal: 10 }), /превышает лимит/);
+  assert.throws(() => expandTargets('a.com, b.com, c.com', { maxTotal: 2 }), /Превышен лимит/);
+
+  assert.equal(csvCell('a,"b"'), '"a,""b"""');
+
+  const sampleRep = {
+    Whoami: { Ip: '1.1.1.1', Asn: 'AS13335', Org: 'CF, Inc', Status: { Code: 'OK' } },
+    CidrWhitelist: { Status: { Code: 'NOT_DETECTED' } },
+    Dns: { Doh: { Providers: { Google: [{ Code: 'OK' }] } } },
+    Webhost: { Popular: { Items: [{ Group: 'YT', IP: '1.2.3.4', AS: 'AS1', Org: 'G', Alive: { Code: 'OK' }, Tcp1620: { Code: 'DETECTED' }, BurstTxKbps: 1200 }] } },
+  };
+  const rCsv = reportToCsv(sampleRep);
+  assert.ok(rCsv.includes('"CF, Inc"'));
+  assert.ok(rCsv.includes('DETECTED'));
+  const rTxt = reportToTxt(sampleRep, 'r1');
+  assert.ok(rTxt.includes('by Ivan Tokarev'));
+  assert.ok(rTxt.includes('TCP16-20=DETECTED'));
+  assert.ok(reportToCsv({}).startsWith('Category,'));
+  assert.ok(reportToTxt({}).includes('by Ivan Tokarev'));
+
+  const batchItems = [
+    { idx: 0, target: 'yt.com', state: 'DONE', item: { Alive: { Code: 'OK' }, Tcp1620: { Code: 'OK' }, BurstTxKbps: 500 } },
+    { idx: 1, target: 'bad.com', state: 'FAILED', error: 'timeout' },
+    { target: 'queued.com', state: 'QUEUED' },
+  ];
+  assert.ok(batchToCsv(batchItems).includes('bad.com'));
+  assert.ok(batchToCsv(null).startsWith('Index,'));
+  assert.ok(batchToTxt(batchItems).includes('Ошибок: 1'));
+  assert.ok(batchToTxt(null).includes('Всего: 0'));
 });

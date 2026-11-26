@@ -1,9 +1,28 @@
 // Author: by Ivan Tokarev
 
+import {
+  batchToCsv,
+  batchToTxt,
+  describeCidr,
+  reportToCsv,
+  reportToTxt,
+} from '../shared/batch-export.js';
+
 const STORAGE_KEY_SETTINGS = 'dpi_settings_v1';
 
 const selectedModules = new Set(['whoami', 'cidr', 'webhost', 'doh']);
 let probeHistory = [];
+let currentBatch = { status: 'IDLE', items: [], etaSeconds: null, recovered: false };
+
+function downloadTextFile(filename, content, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 
 // Tabs switching
 document.querySelectorAll('.tab').forEach((btn) => {
@@ -246,6 +265,121 @@ function renderProbeHistory() {
     .join('');
 }
 
+// Batch / CIDR Queue UI
+const batchInputEl = document.getElementById('batch-input');
+const cidrHintEl = document.getElementById('cidr-calc-hint');
+const batchErrEl = document.getElementById('batch-error');
+
+batchInputEl.addEventListener('input', () => {
+  batchErrEl.textContent = '';
+  const tok = batchInputEl.value
+    .split(/[\r\n,;\s]+/)
+    .map((s) => s.trim())
+    .find((s) => s.includes('/') && !/^https?:\/\//i.test(s));
+  const info = tok ? describeCidr(tok) : null;
+  cidrHintEl.textContent = info
+    ? `CIDR ${info.input}: ${info.network} – ${info.lastAddress} · всего ${info.totalCount} (рабочих: ${info.usableCount})`
+    : '';
+});
+
+document.getElementById('btn-start-batch').addEventListener('click', async () => {
+  batchErrEl.textContent = '';
+  const rawText = batchInputEl.value.trim();
+  if (!rawText) return;
+  const granted = await chrome.permissions.request({ origins: ['https://*/*', 'http://*/*'] });
+  if (!granted) {
+    batchErrEl.textContent = 'Требуется разрешение на доступ к проверяемым хостам.';
+    return;
+  }
+  const resp = await chrome.runtime.sendMessage({ type: 'START_BATCH', rawText, usableOnly: true });
+  if (!resp?.ok) {
+    batchErrEl.textContent = resp?.error || 'Не удалось запустить очередь';
+  } else if (resp.batch) {
+    renderBatch(resp.batch);
+  }
+});
+
+function renderBatch(b) {
+  currentBatch = b || { status: 'IDLE', items: [] };
+  const card = document.getElementById('batch-status-card');
+  if (!b || !Array.isArray(b.items) || b.items.length === 0) {
+    card.classList.add('hidden');
+    card.innerHTML = '';
+    return;
+  }
+  card.classList.remove('hidden');
+  const total = b.items.length;
+  const done = b.items.filter((q) => q.state === 'DONE' || q.state === 'FAILED').length;
+  const failed = b.items.filter((q) => q.state === 'FAILED').length;
+  const issues = b.items.filter(
+    (q) => q.state === 'FAILED' || (q.item && (q.item.Alive?.Code !== 'OK' || q.item.Tcp1620?.Code === 'DETECTED')),
+  ).length;
+  const stText =
+    b.status === 'RUNNING'
+      ? `Выполняется${b.etaSeconds ? ` (~${b.etaSeconds}с)` : ''}`
+      : b.status === 'PAUSED'
+        ? 'На паузе'
+        : 'Завершено';
+
+  const rows = b.items
+    .slice(0, 100)
+    .map((q) => {
+      if (q.item) {
+        const aliveOk = q.item.Alive?.Code === 'OK';
+        const tcpBad = q.item.Tcp1620?.Code === 'DETECTED';
+        return `
+          <div class="item-box ${!aliveOk || tcpBad ? 'bad' : ''}">
+            <div class="row"><strong class="mono">${esc(q.target)}</strong><span class="badge ${aliveOk ? 'good' : 'bad'}">${aliveOk ? 'OK' : esc(q.item.Alive?.Msg)}</span></div>
+            <div class="wrap">
+              <span class="badge ${tcpBad ? 'bad' : q.item.Tcp1620?.Code === 'OK' ? 'good' : 'neutral'}">TCP 16-20: ${tcpBad ? 'БЛОК' : q.item.Tcp1620?.Code === 'OK' ? 'нет' : 'пропущен'}</span>
+              ${q.item.BurstTxKbps ? `<span class="badge neutral">↑ ${fmtSpeed(q.item.BurstTxKbps)}</span>` : ''}
+            </div>
+          </div>
+        `;
+      }
+      return `<div class="item-box"><div class="row"><span class="mono">${esc(q.target)}</span><span class="badge ${q.state === 'FAILED' ? 'bad' : 'neutral'}">${esc(q.error || q.state)}</span></div></div>`;
+    })
+    .join('');
+
+  card.innerHTML = `
+    ${b.recovered ? `<div class="muted" style="color:var(--warn);margin-bottom:6px;">Очередь восстановлена после перезапуска — нажмите «Продолжить».</div>` : ''}
+    <div class="row">
+      <div class="card-title" style="margin:0;">Очередь: ${done} / ${total}</div>
+      <span class="badge ${b.status === 'COMPLETED' ? 'good' : 'info'}">${stText}</span>
+    </div>
+    <div class="wrap" style="margin-top:6px;">
+      <span class="badge ${issues > 0 ? 'bad' : 'good'}">Проблем: ${issues}</span>
+      <span class="badge ${failed > 0 ? 'warn' : 'neutral'}">Ошибок: ${failed}</span>
+    </div>
+    <div class="wrap" style="margin-top:8px;">
+      ${b.status === 'RUNNING' ? `<button id="btn-batch-pause" class="btn btn-outline btn-sm">Пауза</button>` : ''}
+      ${b.status === 'PAUSED' ? `<button id="btn-batch-resume" class="btn btn-primary btn-sm">Продолжить</button>` : ''}
+      ${b.status !== 'RUNNING' && failed > 0 ? `<button id="btn-batch-retry" class="btn btn-outline btn-sm">Повторить (${failed})</button>` : ''}
+      <button id="btn-batch-stop" class="btn btn-outline btn-sm">Сбросить</button>
+    </div>
+    <div class="wrap" style="margin-top:8px;">
+      <button id="btn-batch-csv" class="btn btn-outline btn-sm">CSV</button>
+      <button id="btn-batch-txt" class="btn btn-outline btn-sm">TXT</button>
+      <button id="btn-batch-json" class="btn btn-outline btn-sm">JSON</button>
+    </div>
+    <div class="container" style="padding:8px 0 0;">${rows}</div>
+  `;
+
+  document.getElementById('btn-batch-pause')?.addEventListener('click', () => chrome.runtime.sendMessage({ type: 'PAUSE_BATCH' }));
+  document.getElementById('btn-batch-resume')?.addEventListener('click', () => chrome.runtime.sendMessage({ type: 'RESUME_BATCH' }));
+  document.getElementById('btn-batch-retry')?.addEventListener('click', () => chrome.runtime.sendMessage({ type: 'RETRY_FAILED_BATCH' }));
+  document.getElementById('btn-batch-stop')?.addEventListener('click', () => chrome.runtime.sendMessage({ type: 'STOP_BATCH' }));
+  document.getElementById('btn-batch-csv')?.addEventListener('click', () =>
+    downloadTextFile('dpi-batch.csv', batchToCsv(currentBatch.items), 'text/csv;charset=utf-8'),
+  );
+  document.getElementById('btn-batch-txt')?.addEventListener('click', () =>
+    downloadTextFile('dpi-batch.txt', batchToTxt(currentBatch.items), 'text/plain;charset=utf-8'),
+  );
+  document.getElementById('btn-batch-json')?.addEventListener('click', () =>
+    downloadTextFile('dpi-batch.json', JSON.stringify(currentBatch, null, 2), 'application/json'),
+  );
+}
+
 // Reports tab
 async function loadReports() {
   const resp = await chrome.runtime.sendMessage({ type: 'GET_REPORTS' });
@@ -260,11 +394,13 @@ async function loadReports() {
       <div class="card">
         <div class="row">
           <div>
-            <div class="mono"><strong>${esc(r.id)}.json</strong></div>
+            <div class="mono"><strong>${esc(r.id)}</strong></div>
             <div class="muted">${esc(r.provider || 'Локальная проверка')}</div>
           </div>
           <div class="wrap">
-            <button class="btn btn-outline btn-sm btn-dl" data-id="${esc(r.id)}">JSON</button>
+            <button class="btn btn-outline btn-sm btn-dl-json" data-id="${esc(r.id)}">JSON</button>
+            <button class="btn btn-outline btn-sm btn-dl-csv" data-id="${esc(r.id)}">CSV</button>
+            <button class="btn btn-outline btn-sm btn-dl-txt" data-id="${esc(r.id)}">TXT</button>
             <button class="btn btn-outline btn-sm btn-del" data-id="${esc(r.id)}">✕</button>
           </div>
         </div>
@@ -272,20 +408,24 @@ async function loadReports() {
     `)
     .join('');
 
-  el.querySelectorAll('.btn-dl').forEach((btn) => {
+  el.querySelectorAll('.btn-dl-json').forEach((btn) => {
     btn.addEventListener('click', () => {
       const rec = list.find((x) => x.id === btn.dataset.id);
-      if (!rec) return;
-      const blob = new Blob([JSON.stringify(rec.report, null, 2)], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `${rec.id}.json`;
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      if (rec) downloadTextFile(`${rec.id}.json`, JSON.stringify(rec.report, null, 2), 'application/json');
     });
   });
-
+  el.querySelectorAll('.btn-dl-csv').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const rec = list.find((x) => x.id === btn.dataset.id);
+      if (rec) downloadTextFile(`${rec.id}.csv`, reportToCsv(rec.report), 'text/csv;charset=utf-8');
+    });
+  });
+  el.querySelectorAll('.btn-dl-txt').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const rec = list.find((x) => x.id === btn.dataset.id);
+      if (rec) downloadTextFile(`${rec.id}.txt`, reportToTxt(rec.report, rec.id), 'text/plain;charset=utf-8');
+    });
+  });
   el.querySelectorAll('.btn-del').forEach((btn) => {
     btn.addEventListener('click', async () => {
       await chrome.runtime.sendMessage({ type: 'DELETE_REPORT', id: btn.dataset.id });
@@ -325,11 +465,14 @@ document.getElementById('btn-save-settings').addEventListener('click', async () 
 // Live state listener
 chrome.runtime.onMessage.addListener((msg) => {
   if (msg?.type === 'STATE_UPDATE') renderState(msg.state);
+  if (msg?.type === 'BATCH_UPDATE') renderBatch(msg.batch);
 });
 
 (async () => {
   const resp = await chrome.runtime.sendMessage({ type: 'GET_STATE' });
   renderState(resp?.state);
+  const bResp = await chrome.runtime.sendMessage({ type: 'GET_BATCH' });
+  if (bResp?.batch) renderBatch(bResp.batch);
   const s = await chrome.storage.local.get(STORAGE_KEY_SETTINGS);
   const hosts = s[STORAGE_KEY_SETTINGS]?.customHosts || [];
   document.getElementById('custom-hosts').value = hosts.join('\n');

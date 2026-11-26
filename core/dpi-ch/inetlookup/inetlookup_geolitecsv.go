@@ -171,6 +171,9 @@ func (l *geoliteCsv) OrgTerms(opt OrgTermsOpt) []string {
 
 func (l *geoliteCsv) IpInfo(ip netip.Addr) IpInfo {
 	defCidr := netip.MustParsePrefix("0.0.0.0/0")
+	if ip.Is6() {
+		defCidr = netip.MustParsePrefix("::/0")
+	}
 
 	info := IpInfo{Ip: ip, Subnet: defCidr}
 	for _, cidr2as := range l.cidrAs {

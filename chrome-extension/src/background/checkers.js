@@ -35,7 +35,15 @@ export function isAbortOrTimeout(err) {
 }
 
 export function isPublicIp(raw) {
-  const ip = String(raw || '').trim();
+  const ip = String(raw || '').trim().replace(/^\[|\]$/g, '');
+  if (ip.includes(':')) {
+    if (!/^[0-9a-fA-F:.]+$/.test(ip)) return false;
+    const low = ip.toLowerCase();
+    if (low === '::' || low === '::1' || low.startsWith('fe80:') || low.startsWith('fc') || low.startsWith('fd')) {
+      return false;
+    }
+    return true;
+  }
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip);
   if (!m) return false;
   const [a, b, c, d] = m.slice(1).map(Number);
@@ -228,6 +236,10 @@ export function normalizeTargetHost(raw) {
   host = host.replace(/^https?:\/\//i, '');
   const slashIdx = host.indexOf('/');
   if (slashIdx >= 0) host = host.slice(0, slashIdx);
+  // Wrap bare IPv6 literals in brackets so URL https://[ipv6]/ is valid
+  if (!host.startsWith('[') && (host.match(/:/g) || []).length >= 2) {
+    host = `[${host}]`;
+  }
   return host;
 }
 

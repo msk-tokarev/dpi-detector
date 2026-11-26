@@ -272,7 +272,7 @@ func PrepareGeo(force bool, allowOnlineUpdate bool, l EventListener) (err error)
 // Quick single-host probe
 // ---------------------------------------------------------------------------
 
-// CheckCustomHost probes a single domain or IPv4 address using dpi-ch's webhost engine
+// CheckCustomHost probes a single domain, IPv4, or IPv6 address using dpi-ch's webhost engine
 // (Alive / TLS / SNI block / TCP 16-20 / Siberian / Burst throughput).
 // Returns JSON-encoded WebhostItemDto.
 func CheckCustomHost(target string, sni string, port int32) (resJson string, err error) {
@@ -289,8 +289,31 @@ func CheckCustomHost(target string, sni string, port int32) (resJson string, err
 	if idx := strings.IndexByte(target, '/'); idx >= 0 {
 		target = target[:idx]
 	}
+
+	// Handle bracketed IPv6 ([2606:4700:4700::1111] or [::1]:8443) and host:port
+	if strings.HasPrefix(target, "[") {
+		if end := strings.IndexByte(target, ']'); end > 0 {
+			rest := target[end+1:]
+			target = target[1:end]
+			if strings.HasPrefix(rest, ":") && (port <= 0 || port > 65535) {
+				if p, perr := strconv.Atoi(rest[1:]); perr == nil && p > 0 && p <= 65535 {
+					port = int32(p)
+				}
+			}
+		}
+	} else if strings.Count(target, ":") == 1 {
+		if h, pStr, ok := strings.Cut(target, ":"); ok && h != "" {
+			if p, perr := strconv.Atoi(pStr); perr == nil && p > 0 && p <= 65535 {
+				target = h
+				if port <= 0 || port > 65535 {
+					port = int32(p)
+				}
+			}
+		}
+	}
+
 	if target == "" {
-		return "", errors.New("укажите домен или IPv4")
+		return "", errors.New("укажите домен, IPv4 или IPv6")
 	}
 	if port <= 0 || port > 65535 {
 		port = 443
@@ -304,12 +327,13 @@ func CheckCustomHost(target string, sni string, port int32) (resJson string, err
 	sniVal := strings.TrimSpace(sni)
 
 	if parsed, perr := netip.ParseAddr(target); perr == nil {
-		if !parsed.Is4() {
-			return "", errors.New("поддерживаются только IPv4-адреса")
-		}
-		ip = parsed
+		ip = parsed.Unmap()
 		if sniVal != "" {
 			hostHeader = sniVal
+		} else if ip.Is6() {
+			hostHeader = "[" + ip.String() + "]"
+		} else {
+			hostHeader = ip.String()
 		}
 	} else {
 		ips, lerr := inetlookup.LookupIpViaDefault(ctx, target)
@@ -323,7 +347,17 @@ func CheckCustomHost(target string, sni string, port int32) (resJson string, err
 			}
 		}
 		if !ip.IsValid() {
-			return "", fmt.Errorf("у %s не найдено IPv4-записей", target)
+			for _, raw := range ips {
+				if v6 := raw.To16(); v6 != nil {
+					if addr, ok := netip.AddrFromSlice(v6); ok {
+						ip = addr.Unmap()
+						break
+					}
+				}
+			}
+		}
+		if !ip.IsValid() {
+			return "", fmt.Errorf("у %s не найдено IPv4/IPv6-записей", target)
 		}
 		if sniVal == "" {
 			sniVal = target

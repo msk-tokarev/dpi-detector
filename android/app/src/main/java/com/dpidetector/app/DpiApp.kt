@@ -9,6 +9,6 @@ class DpiApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        engine = DpiEngine(this)
+        engine = DpiEngine(this, enableForegroundSync = true)
     }
 }

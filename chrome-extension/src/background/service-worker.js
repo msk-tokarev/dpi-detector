@@ -1,6 +1,6 @@
 // Author: by Ivan Tokarev
-// Chrome Manifest V3 Service Worker: orchestrates DPI checks, passive tab error radar,
-// report persistence, and optional Native Messaging bridge to Go `dpich`.
+// Chrome Manifest V3 Service Worker: orchestrates DPI checks, batch CIDR/domain queue,
+// passive tab error radar, report persistence, and optional Native Messaging bridge to Go `dpich`.
 
 import {
   buildDpichReport,
@@ -16,14 +16,17 @@ import {
   DPI_NETWORK_ERRORS,
   WEBHOST_SUITE,
 } from '../shared/suites.js';
+import { expandTargets } from '../shared/batch-export.js';
 
 const STORAGE_KEY_STATE = 'dpi_state_v1';
 const STORAGE_KEY_REPORTS = 'dpi_reports_v1';
 const STORAGE_KEY_SETTINGS = 'dpi_settings_v1';
+const STORAGE_KEY_BATCH = 'dpi_batch_v1';
 const NATIVE_HOST_NAME = 'com.dpidetector.dpich';
 
 const tabErrors = new Map(); // tabId -> [{ url, error, ts }]
 let activeRunAbort = null;
+let batchAbort = null;
 let nativePort = null;
 
 let runtimeState = {
@@ -37,6 +40,15 @@ let runtimeState = {
   lastReportId: null,
   nativeConnected: false,
 };
+
+let batchState = {
+  status: 'IDLE', // IDLE | RUNNING | PAUSED | COMPLETED
+  items: [],      // [{ idx, target, state: QUEUED|RUNNING|DONE|FAILED, item, error }]
+  etaSeconds: null,
+  recovered: false,
+};
+let batchLoaded = false;
+const recentBatchMs = [];
 
 function logLine(msg) {
   const ts = new Date().toTimeString().slice(0, 8);
@@ -59,6 +71,38 @@ function broadcastState() {
     chrome.runtime.sendMessage({ type: 'STATE_UPDATE', state: runtimeState }).catch(() => {});
   } catch {
     // no active UI listener
+  }
+}
+
+async function ensureBatchLoaded() {
+  if (batchLoaded) return;
+  batchLoaded = true;
+  try {
+    const res = await chrome.storage.local.get(STORAGE_KEY_BATCH);
+    const saved = res[STORAGE_KEY_BATCH];
+    if (saved && Array.isArray(saved.items) && saved.items.length > 0) {
+      batchState = saved;
+      if (batchState.status === 'RUNNING') {
+        batchState.status = 'PAUSED';
+        batchState.recovered = true;
+        batchState.etaSeconds = null;
+        for (const q of batchState.items) {
+          if (q.state === 'RUNNING') q.state = 'QUEUED';
+        }
+        await chrome.storage.local.set({ [STORAGE_KEY_BATCH]: batchState });
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+async function persistAndBroadcastBatch() {
+  try {
+    await chrome.storage.local.set({ [STORAGE_KEY_BATCH]: batchState });
+    chrome.runtime.sendMessage({ type: 'BATCH_UPDATE', batch: batchState }).catch(() => {});
+  } catch {
+    // ignore
   }
 }
 
@@ -111,6 +155,141 @@ if (typeof chrome !== 'undefined' && chrome.tabs) {
   });
   chrome.permissions?.onAdded?.addListener(() => attachPassiveRadarIfAllowed());
   attachPassiveRadarIfAllowed();
+}
+
+// ---------------------------------------------------------------------------
+// Batch / CIDR Queue Runner (Pause / Resume / Retry / Recovery)
+// ---------------------------------------------------------------------------
+
+async function runBatchWorkers(concurrency = 3) {
+  if (batchAbort) batchAbort.abort();
+  const ctrl = new AbortController();
+  batchAbort = ctrl;
+  const settings = await getSettings();
+
+  const workers = Array.from({ length: concurrency }, async () => {
+    while (!ctrl.signal.aborted && batchState.status === 'RUNNING') {
+      const next = batchState.items.find((q) => q.state === 'QUEUED');
+      if (!next) break;
+      next.state = 'RUNNING';
+      await persistAndBroadcastBatch();
+
+      const t0 = Date.now();
+      try {
+        const item = await checkWebhostTarget(
+          { name: next.target, host: next.target },
+          fetch,
+          { headTimeoutMs: settings.headTimeoutMs, tcp1620TimeoutMs: settings.tcp1620TimeoutMs },
+        );
+        if (ctrl.signal.aborted) {
+          if (next.state === 'RUNNING') next.state = 'QUEUED';
+          break;
+        }
+        next.state = 'DONE';
+        next.item = item;
+        next.error = null;
+      } catch (e) {
+        if (ctrl.signal.aborted) {
+          if (next.state === 'RUNNING') next.state = 'QUEUED';
+          break;
+        }
+        next.state = 'FAILED';
+        next.error = e?.message || String(e);
+      }
+
+      const elapsed = Math.max(1, Date.now() - t0);
+      if (recentBatchMs.length >= 8) recentBatchMs.shift();
+      recentBatchMs.push(elapsed);
+      const remaining = batchState.items.filter((q) => q.state === 'QUEUED' || q.state === 'RUNNING').length;
+      if (remaining > 0 && recentBatchMs.length >= 2) {
+        const avg = recentBatchMs.reduce((a, b) => a + b, 0) / recentBatchMs.length;
+        batchState.etaSeconds = Math.max(1, Math.round((avg * remaining) / concurrency / 1000));
+      } else {
+        batchState.etaSeconds = null;
+      }
+      await persistAndBroadcastBatch();
+    }
+  });
+
+  await Promise.all(workers);
+  if (!ctrl.signal.aborted && batchState.status === 'RUNNING') {
+    batchState.status = 'COMPLETED';
+    batchState.etaSeconds = null;
+    await persistAndBroadcastBatch();
+  }
+}
+
+async function startBatch(rawText, usableOnly = true) {
+  await ensureBatchLoaded();
+  if (batchState.status === 'RUNNING') return { ok: false, error: 'Очередь уже выполняется' };
+  let targets;
+  try {
+    targets = expandTargets(rawText, { usableOnly, maxTotal: 2048 });
+  } catch (e) {
+    return { ok: false, error: e?.message || String(e) };
+  }
+  recentBatchMs.length = 0;
+  batchState = {
+    status: 'RUNNING',
+    items: targets.map((t, idx) => ({ idx, target: t, state: 'QUEUED', item: null, error: null })),
+    etaSeconds: null,
+    recovered: false,
+  };
+  await persistAndBroadcastBatch();
+  runBatchWorkers(3);
+  return { ok: true, batch: batchState };
+}
+
+async function pauseBatch() {
+  await ensureBatchLoaded();
+  if (batchState.status !== 'RUNNING') return { ok: true, batch: batchState };
+  batchAbort?.abort();
+  batchAbort = null;
+  for (const q of batchState.items) {
+    if (q.state === 'RUNNING') q.state = 'QUEUED';
+  }
+  batchState.status = 'PAUSED';
+  batchState.etaSeconds = null;
+  await persistAndBroadcastBatch();
+  return { ok: true, batch: batchState };
+}
+
+async function resumeBatch() {
+  await ensureBatchLoaded();
+  if (batchState.status !== 'PAUSED' && batchState.status !== 'COMPLETED') return { ok: true, batch: batchState };
+  batchState.status = 'RUNNING';
+  batchState.recovered = false;
+  await persistAndBroadcastBatch();
+  runBatchWorkers(3);
+  return { ok: true, batch: batchState };
+}
+
+async function retryFailedBatch() {
+  await ensureBatchLoaded();
+  if (batchState.status === 'RUNNING') return { ok: false, error: 'Сначала поставьте очередь на паузу' };
+  let count = 0;
+  for (const q of batchState.items) {
+    if (q.state === 'FAILED') {
+      q.state = 'QUEUED';
+      q.error = null;
+      count++;
+    }
+  }
+  if (count > 0) {
+    batchState.status = 'RUNNING';
+    await persistAndBroadcastBatch();
+    runBatchWorkers(3);
+  }
+  return { ok: true, batch: batchState };
+}
+
+async function stopBatch() {
+  batchAbort?.abort();
+  batchAbort = null;
+  recentBatchMs.length = 0;
+  batchState = { status: 'IDLE', items: [], etaSeconds: null, recovered: false };
+  await persistAndBroadcastBatch();
+  return { ok: true, batch: batchState };
 }
 
 // ---------------------------------------------------------------------------
@@ -205,7 +384,6 @@ async function runScan(opts = {}) {
             runtimeState.webhost[sec.name] = { Items: [], FarmTimeout: false };
             logLine(`webhost [${sec.name}]: проверка ${sec.targets.length} хостов…`);
 
-            // Concurrency pool of 4 targets to keep browser responsive
             const queue = [...sec.targets];
             const workers = Array.from({ length: 4 }, async () => {
               while (queue.length > 0 && !signal.aborted) {
@@ -302,6 +480,25 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
         case 'GET_STATE':
           sendResponse({ state: runtimeState });
           break;
+        case 'GET_BATCH':
+          await ensureBatchLoaded();
+          sendResponse({ batch: batchState });
+          break;
+        case 'START_BATCH':
+          sendResponse(await startBatch(msg.rawText, msg.usableOnly !== false));
+          break;
+        case 'PAUSE_BATCH':
+          sendResponse(await pauseBatch());
+          break;
+        case 'RESUME_BATCH':
+          sendResponse(await resumeBatch());
+          break;
+        case 'RETRY_FAILED_BATCH':
+          sendResponse(await retryFailedBatch());
+          break;
+        case 'STOP_BATCH':
+          sendResponse(await stopBatch());
+          break;
         case 'GET_TAB_ERRORS':
           sendResponse({ errors: tabErrors.get(msg.tabId) || [] });
           break;
@@ -350,7 +547,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime?.onMessage) {
           }
           break;
         default:
-          sendResponse({ ok: false, error: 'Unknown message type' });
+          sendResponse({ ok: false, error: 'Unknown message' });
       }
     })();
     return true;
